@@ -7574,6 +7574,9 @@ void __init sched_init(void)
 		 * directly in rq->cfs (i.e root_task_group->se[] = NULL).
 		 */
 		init_tg_cfs_entry(&root_task_group, &rq->cfs, NULL, i, NULL);
+#ifdef CONFIG_CFS_BANDWIDTH
+		INIT_LIST_HEAD(&rq->throttled_cfs_rq);
+#endif /* CONFIG_CFS_BANDWIDTH */
 #endif /* CONFIG_FAIR_GROUP_SCHED */
 
 		rq->rt.rt_runtime = def_rt_bandwidth.rt_runtime;
@@ -8339,7 +8342,7 @@ static const u64 max_cfs_runtime = MAX_BW * NSEC_PER_USEC;
 
 static int __cfs_schedulable(struct task_group *tg, u64 period, u64 runtime);
 
-static int tg_set_cfs_bandwidth(struct task_group *tg, u64 period, u64 quota)
+static int tg_set_cfs_bandwidth(struct task_group *tg, u64 period, u64 quota, u64 burst_idle)
 {
 	int i, ret = 0, runtime_enabled, runtime_was_enabled;
 	struct cfs_bandwidth *cfs_b = &tg->cfs_bandwidth;
@@ -8390,6 +8393,7 @@ static int tg_set_cfs_bandwidth(struct task_group *tg, u64 period, u64 quota)
 	raw_spin_lock_irq(&cfs_b->lock);
 	cfs_b->period = ns_to_ktime(period);
 	cfs_b->quota = quota;
+	cfs_b->burst_idle = burst_idle;
 
 	__refill_cfs_bandwidth_runtime(cfs_b);
 
@@ -8423,9 +8427,10 @@ out_unlock:
 
 static int tg_set_cfs_quota(struct task_group *tg, long cfs_quota_us)
 {
-	u64 quota, period;
+	u64 quota, period, burst_idle;
 
 	period = ktime_to_ns(tg->cfs_bandwidth.period);
+	burst_idle = tg->cfs_bandwidth.burst_idle;
 	if (cfs_quota_us < 0)
 		quota = RUNTIME_INF;
 	else if ((u64)cfs_quota_us <= U64_MAX / NSEC_PER_USEC)
@@ -8433,7 +8438,7 @@ static int tg_set_cfs_quota(struct task_group *tg, long cfs_quota_us)
 	else
 		return -EINVAL;
 
-	return tg_set_cfs_bandwidth(tg, period, quota);
+	return tg_set_cfs_bandwidth(tg, period, quota, burst_idle);
 }
 
 static long tg_get_cfs_quota(struct task_group *tg)
@@ -8451,15 +8456,16 @@ static long tg_get_cfs_quota(struct task_group *tg)
 
 static int tg_set_cfs_period(struct task_group *tg, long cfs_period_us)
 {
-	u64 quota, period;
+	u64 quota, period, burst_idle;
 
 	if ((u64)cfs_period_us > U64_MAX / NSEC_PER_USEC)
 		return -EINVAL;
 
 	period = (u64)cfs_period_us * NSEC_PER_USEC;
 	quota = tg->cfs_bandwidth.quota;
+	burst_idle = tg->cfs_bandwidth.burst_idle;
 
-	return tg_set_cfs_bandwidth(tg, period, quota);
+	return tg_set_cfs_bandwidth(tg, period, quota, burst_idle);
 }
 
 static long tg_get_cfs_period(struct task_group *tg)
@@ -8470,6 +8476,23 @@ static long tg_get_cfs_period(struct task_group *tg)
 	do_div(cfs_period_us, NSEC_PER_USEC);
 
 	return cfs_period_us;
+}
+
+static int tg_set_cfs_burst_idle(struct task_group *tg, long burst_idle)
+{
+	u64 quota, period;
+	if (burst_idle != 0 && burst_idle != 1) {
+		return -EINVAL;
+	}
+	period = ktime_to_ns(tg->cfs_bandwidth.period);
+	quota = tg->cfs_bandwidth.quota;
+
+	return tg_set_cfs_bandwidth(tg, period, quota, burst_idle);
+}
+
+static long tg_get_cfs_burst_idle(struct task_group *tg)
+{
+	return tg->cfs_bandwidth.burst_idle;
 }
 
 static s64 cpu_cfs_quota_read_s64(struct cgroup_subsys_state *css,
@@ -8494,6 +8517,18 @@ static int cpu_cfs_period_write_u64(struct cgroup_subsys_state *css,
 				    struct cftype *cftype, u64 cfs_period_us)
 {
 	return tg_set_cfs_period(css_tg(css), cfs_period_us);
+}
+
+static s64 cpu_burst_idle_read_s64(struct cgroup_subsys_state *css,
+				   struct cftype *cft)
+{
+	return tg_get_cfs_burst_idle(css_tg(css));
+}
+
+static int cpu_burst_idle_write_s64(struct cgroup_subsys_state *css,
+				    struct cftype *cftype, s64 burst_idle)
+{
+	return tg_set_cfs_burst_idle(css_tg(css), burst_idle);
 }
 
 struct cfs_schedulable_data {
@@ -8651,6 +8686,11 @@ static struct cftype cpu_legacy_files[] = {
 	{
 		.name = "stat",
 		.seq_show = cpu_cfs_stat_show,
+	},
+	{
+		.name = "burst_idle",
+		.read_s64 = cpu_burst_idle_read_s64,
+		.write_s64 = cpu_burst_idle_write_s64,
 	},
 #endif
 #ifdef CONFIG_RT_GROUP_SCHED
@@ -8819,12 +8859,13 @@ static ssize_t cpu_max_write(struct kernfs_open_file *of,
 {
 	struct task_group *tg = css_tg(of_css(of));
 	u64 period = tg_get_cfs_period(tg);
+	u64 burst_idle = tg_get_cfs_burst_idle(tg);
 	u64 quota;
 	int ret;
 
 	ret = cpu_period_quota_parse(buf, &period, &quota);
 	if (!ret)
-		ret = tg_set_cfs_bandwidth(tg, period, quota);
+		ret = tg_set_cfs_bandwidth(tg, period, quota, burst_idle);
 	return ret ?: nbytes;
 }
 #endif
