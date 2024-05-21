@@ -368,6 +368,7 @@ struct cfs_bandwidth {
 	raw_spinlock_t		lock;
 	ktime_t			period;
 	u64			quota;
+	u64			burst_idle;
 	u64			runtime;
 	s64			hierarchical_quota;
 
@@ -378,10 +379,13 @@ struct cfs_bandwidth {
 	struct hrtimer		slack_timer;
 	struct list_head	throttled_cfs_rq;
 
+	struct list_head	boosted_cfs_rq;
+
 	/* Statistics: */
 	int			nr_periods;
 	int			nr_throttled;
 	u64			throttled_time;
+	u64			boosted_time;
 #endif
 };
 
@@ -614,6 +618,10 @@ struct cfs_rq {
 	int			throttled;
 	int			throttle_count;
 	struct list_head	throttled_list;
+	struct list_head	throttled_rq_list;
+	struct list_head	boosted_list;
+	s64			runtime_boosted;
+	int			boosted;
 #endif /* CONFIG_CFS_BANDWIDTH */
 
 	ANDROID_VENDOR_DATA_ARRAY(1, 16);
@@ -960,6 +968,10 @@ struct rq {
 	struct list_head	leaf_cfs_rq_list;
 	struct list_head	*tmp_alone_branch;
 #endif /* CONFIG_FAIR_GROUP_SCHED */
+
+#ifdef CONFIG_CFS_BANDWIDTH
+	struct list_head	throttled_cfs_rq;
+#endif /* CONFIG_CFS_BANDWIDTH */
 
 	/*
 	 * This is part of a global counter where only the total sum
