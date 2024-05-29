@@ -1540,7 +1540,7 @@ struct sched_group {
 	struct sched_group	*next;			/* Must be a circular list */
 	atomic_t		ref;
 
-	unsigned int		group_weight;
+	unsigned int		group_weight; // group中包含几个cpu
 	struct sched_group_capacity *sgc;
 	int			asym_prefer_cpu;	/* CPU of highest priority in group */
 

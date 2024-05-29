@@ -1167,6 +1167,10 @@ unsigned long uclamp_eff_value(struct task_struct *p, enum uclamp_id clamp_id)
 	struct uclamp_se uc_eff;
 
 	/* Task currently refcounted: use back-annotated (effective) value */
+	// 这个task的有效uclamp信息记录在task->uclamp中，在task执行enqueue
+    // 的时候更新，如果这个task已经被添加进rq的某个桶中（这个task已经在rq上，
+    // 已经执行过enqueue操作），那么task->uclamp中记录的就是有效的uclamp信
+    // 息，否则就需要通过下面的uclamp_eff_get重新计算
 	if (p->uclamp[clamp_id].active)
 		return (unsigned long)p->uclamp[clamp_id].value;
 
@@ -8130,10 +8134,13 @@ static void cpu_util_update_eff(struct cgroup_subsys_state *css)
 	lockdep_assert_held(&uclamp_mutex);
 	SCHED_WARN_ON(!rcu_read_lock_held());
 
+	//遍历这个cgroup下的所有子group
 	css_for_each_descendant_pre(css, top_css) {
 		uc_parent = css_tg(css)->parent
 			? css_tg(css)->parent->uclamp : NULL;
 
+		//1.1 不管是uclamp_min还是uclamp_max，子group的
+        // 有效uclamp值一定小于父group的uclamp值，为啥捏？？？
 		for_each_clamp_id(clamp_id) {
 			/* Assume effective clamps matches requested clamps */
 			eff[clamp_id] = css_tg(css)->uclamp_req[clamp_id].value;
@@ -8162,6 +8169,9 @@ static void cpu_util_update_eff(struct cgroup_subsys_state *css)
 		}
 
 		/* Immediately update descendants RUNNABLE tasks */
+		// 遍历这个cgroup下的所有task，完成下面工作：
+        // a) 更新task的有效uclamp信息，即task->uclamp[]
+        // b) 更新这些task所属的rq的uclamp信息，即rq->uclamp[clamp_id]
 		uclamp_update_active_tasks(css);
 	}
 }

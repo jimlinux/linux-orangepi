@@ -627,7 +627,7 @@ struct sched_dl_entity {
 struct uclamp_se {
 	unsigned int value		: bits_per(SCHED_CAPACITY_SCALE);
 	unsigned int bucket_id		: bits_per(UCLAMP_BUCKETS);
-	unsigned int active		: 1;
+	unsigned int active		: 1; //enqueue此task时写1，dequeue此task时写0，线程刚fork的时候写0
 	unsigned int user_defined	: 1;
 };
 #endif /* CONFIG_UCLAMP_TASK */

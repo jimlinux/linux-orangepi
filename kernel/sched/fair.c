@@ -5883,6 +5883,19 @@ static unsigned long capacity_of(int cpu)
 	return cpu_rq(cpu)->cpu_capacity;
 }
 
+/*
+struct task_struct {
+    ...
+    unsigned int        wakee_flips; //该线程唤醒不同wakee的次数，值越大说明越偏向于唤醒不同的线程且唤醒越频繁
+    unsigned long        wakee_flip_decay_ts; //记录上次wakee_flips衰减的时间点，其每秒衰减为原来的50%
+    struct task_struct    *last_wakee; //该线程上次唤醒的线程
+    ...
+}
+*/
+/*
+ * 若current对p有比较固定的唤醒关系的话，current->wakee_flips将非常的小。
+ * 若经常唤醒其它不同的线程，其值将比较大
+ */
 static void record_wakee(struct task_struct *p)
 {
 	/*
@@ -5890,13 +5903,13 @@ static void record_wakee(struct task_struct *p)
 	 * jiffy will not have built up many flips.
 	 */
 	if (time_after(jiffies, current->wakee_flip_decay_ts + HZ)) {
-		current->wakee_flips >>= 1;
+		current->wakee_flips >>= 1;  // wakee_flips 每1s，衰减到1/2
 		current->wakee_flip_decay_ts = jiffies;
 	}
 
 	if (current->last_wakee != p) {
 		current->last_wakee = p;
-		current->wakee_flips++;
+		current->wakee_flips++;  // 当current这次wake的进程不同于上次wake的进程，++
 	}
 }
 
@@ -5917,10 +5930,34 @@ static void record_wakee(struct task_struct *p)
  * whatever is irrelevant, spread criteria is apparent partner count exceeds
  * socket size.
  */
+/*
+Waker唤醒wakee的场景中，有两种选核思路：一种是聚合的思路，即让waker和wakee尽量的close，从而提高cache hit。
+另外一种思考是分散，即让load尽量平均分配在多个cpu上。不同的唤醒模型使用不同的放置策略，两种简单的唤醒模型：
+
+(1) 在1:N模型中，一个server会不断的唤醒多个不同的client。
+(2) 在1:1模型中，线程A和线程B不断的唤醒对方。
+
+在1:N模型中，如果N是一个较大的数值，那么让waker和wakee尽量的close会导致负荷的极度不平均，这会waker所在的sd会承担太多的task，从而引起性能下降。
+在1:1模型中，让waker和wakee尽量的close不存在这样的问题，还能提高性能。
+实际的程序中，唤醒关系可能没有那么简单，一个wakee可能是另外一个关系中的waker，交互可能是M:N的形式。
+考虑这样一个场景：waker把wakee拉近，而wakee自身的wakee flips比较大，由于wakee也会做waker，那么更多的线程也会拉近waker所在的sd，从而进一步加剧CPU资源的竞争。
+因此waker和wakee的wakee flips的数值都不能太大，太大的时候应该禁止wake affine。内核中通过 wake_wide() 来判断是否使能wake affine。
+*/
+/*
+ * 通过开关频率启发式检测 M:N 唤醒者/被唤醒者关系。
+ * 许多唤醒者唤醒的是与上次不同的任务，其频率大约是唤醒某一任务的 N 倍。
+ * 为了确定我们是否应该让负载分散与合并到共享缓存，我们在一对伙伴的一个中寻找最小为 llc_size 的“翻转”频率，在另一个中寻找大于 lls_size 频率的因子。
+ * 满足这两个条件，我们可以相对确定这种关系是非一夫一妻制的，伙伴数量超过套接字大小。
+ * Waker/wakee 是client/server、worker/dispatcher、中断源或任何无关紧要的东西，传播标准是明显的合作伙伴数量超过套接字大小。
+ *
+ * 对于有比较固定唤醒关系的，返回0，否则返回1
+ */
 static int wake_wide(struct task_struct *p)
 {
 	unsigned int master = current->wakee_flips;
 	unsigned int slave = p->wakee_flips;
+	// llc: latst level cache, update_top_cache_domain赋值的
+	// 实际上当前cpu MC domain下的cpu数量
 	int factor = __this_cpu_read(sd_llc_size);
 
 	if (master < slave)
@@ -5932,7 +5969,7 @@ static int wake_wide(struct task_struct *p)
 
 /*
  * The purpose of wake_affine() is to quickly determine on which CPU we can run
- * soonest. For the purpose of speed we only consider the waking and previous
+ * soonest(最快的). For the purpose of speed we only consider the waking and previous
  * CPU.
  *
  * wake_affine_idle() - only considers 'now', it check if the waking CPU is
@@ -5957,12 +5994,19 @@ wake_affine_idle(int this_cpu, int prev_cpu, int sync)
 	 * a cpufreq perspective, it's better to have higher utilisation
 	 * on one CPU.
 	 */
+	//若正在执行的cpu是idle的(中断唤醒)，且当前cpu和任务上次运行的cpu属于同一个MC domain
+	//若prev_cpu也idle就返回prev_cpu,否则返回当前正在运行的idle cpu
 	if (available_idle_cpu(this_cpu) && cpus_share_cache(this_cpu, prev_cpu))
 		return available_idle_cpu(prev_cpu) ? prev_cpu : this_cpu;
 
+	/*
+     * 若同步唤醒且当前cpu上只有一个任务(也就是waker)在运行，就返回当前cpu，因为sync唤醒，
+     * 当前waker马上就要睡眠了。
+     */
 	if (sync && cpu_rq(this_cpu)->nr_running == 1)
 		return this_cpu;
 
+	// 没选到
 	return nr_cpumask_bits;
 }
 
@@ -5973,50 +6017,61 @@ wake_affine_weight(struct sched_domain *sd, struct task_struct *p,
 	s64 this_eff_load, prev_eff_load;
 	unsigned long task_load;
 
+	//当前正在运行cpu上的CFS任务的负载, return cfs_rq->avg.load_avg;
 	this_eff_load = cpu_load(cpu_rq(this_cpu));
 
 	if (sync) {
-		unsigned long current_load = task_h_load(current);
-
+		unsigned long current_load = task_h_load(current); ////约为 current->se.avg.load_avg;
+		//当前任务的负载比当前cpu上cfs任务的负载之和还大？应该是安全的容错处理
 		if (current_load > this_eff_load)
 			return this_cpu;
 
 		this_eff_load -= current_load;
 	}
 
-	task_load = task_h_load(p);
+	task_load = task_h_load(p); //约为 p->se.avg.load_avg;
 
-	this_eff_load += task_load;
+	this_eff_load += task_load;  //计算若p把current从当前cpu上挤下去后，cpu上CFS任务的总负载
 	if (sched_feat(WA_BIAS))
-		this_eff_load *= 100;
-	this_eff_load *= capacity_of(prev_cpu);
+		this_eff_load *= 100; //乘以100
+	//再乘以cpu算力中可用于cfs任务的算力(出去温限/irq/rt/dl占用后的算力)，乘以的竟然是prev_cpu的！
+	this_eff_load *= capacity_of(prev_cpu); //乘以的竟然是prev_cpu可用于cfs任务的算力, 主要是做算力换算
 
+	//prev_cpu::rq.cfs_rq->avg.load_avg
 	prev_eff_load = cpu_load(cpu_rq(prev_cpu));
-	prev_eff_load -= task_load;
+	prev_eff_load -= task_load; //这里为什么要减去？
 	if (sched_feat(WA_BIAS))
-		prev_eff_load *= 100 + (sd->imbalance_pct - 100) / 2;
-	prev_eff_load *= capacity_of(this_cpu);
+		prev_eff_load *= 100 + (sd->imbalance_pct - 100) / 2; //MC和DIE都是乘以 100+(117-100)/2
+	prev_eff_load *= capacity_of(this_cpu); //乘以的竟然是this_cpu可用于cfs任务的算力！
 
 	/*
 	 * If sync, adjust the weight of prev_eff_load such that if
 	 * prev_eff == this_eff that select_idle_sibling() will consider
 	 * stacking the wakee on top of the waker if no other CPU is
 	 * idle.
+	 * 如果同步唤醒，则调整 prev_eff_load 的权重，以便如果 prev_eff == this_eff 
+	 * 则 select_idle_sibling() 将考虑在没有其它空闲CPU的情况下将
+     * 被唤醒的任务放在唤醒它的CPU上。
 	 */
 	if (sync)
 		prev_eff_load += 1;
 
+	/*公式整理一下为：this_cpu_load/this_cpu_cap < 108.5% * prev_cpu_load/prev_cpu_cap 成立就返回this_cpu*/
 	return this_eff_load < prev_eff_load ? this_cpu : nr_cpumask_bits;
 }
 
+// 参数sd是MC domain
 static int wake_affine(struct sched_domain *sd, struct task_struct *p,
 		       int this_cpu, int prev_cpu, int sync)
 {
 	int target = nr_cpumask_bits;
 
+	// /sys/kernel/debug/sched_features
+	// 从this_cpu和prev_cpu中选idle
 	if (sched_feat(WA_IDLE))
 		target = wake_affine_idle(this_cpu, prev_cpu, sync);
 
+	// 计算this_cpu负载低于prev_cpu，则选择this_cpu
 	if (sched_feat(WA_WEIGHT) && target == nr_cpumask_bits)
 		target = wake_affine_weight(sd, p, this_cpu, prev_cpu, sync);
 
@@ -6035,6 +6090,8 @@ find_idlest_group(struct sched_domain *sd, struct task_struct *p, int this_cpu);
 /*
  * find_idlest_group_cpu - find the idlest CPU among the CPUs in the group.
  */
+// 1. 选择idle中exit_latency最低的，进入idle更晚的，
+// 2. 如果没有idle cpu，就选load最低的cpu
 static int
 find_idlest_group_cpu(struct sched_group *group, struct task_struct *p, int this_cpu)
 {
@@ -6046,14 +6103,17 @@ find_idlest_group_cpu(struct sched_group *group, struct task_struct *p, int this
 	int i;
 
 	/* Check if we have any choice: */
+	//对于MC层级的sg这里就直接就返回了，因为sg中只有一个cpu，DIE层级继续往下走。
 	if (group->group_weight == 1)
 		return cpumask_first(sched_group_span(group));
 
 	/* Traverse only the allowed CPUs */
+	//DIE层级的sg,遍历这个cluster中任务p亲和性允许的cpu
 	for_each_cpu_and(i, sched_group_span(group), p->cpus_ptr) {
-		if (sched_idle_cpu(i))
+		if (sched_idle_cpu(i)) //若此cpu rq中只有SCHED_IDLE类型的任务，就选此cpu
 			return i;
 
+		//判断此cpu是否是idle cpu: rq->curr==rq->idle && rq->nr_running==0 && rq->ttwu_pending==0
 		if (available_idle_cpu(i)) {
 			struct rq *rq = cpu_rq(i);
 			struct cpuidle_state *idle = idle_get_state(rq);
@@ -6063,11 +6123,11 @@ find_idlest_group_cpu(struct sched_group *group, struct task_struct *p, int this
 				 * has the smallest exit latency irrespective
 				 * of any idle timestamp.
 				 */
-				min_exit_latency = idle->exit_latency;
+				min_exit_latency = idle->exit_latency; //记录最小退出延迟
 				latest_idle_timestamp = rq->idle_stamp;
-				shallowest_idle_cpu = i;
-			} else if ((!idle || idle->exit_latency == min_exit_latency) &&
-				   rq->idle_stamp > latest_idle_timestamp) {
+				shallowest_idle_cpu = i; //记录最小的退出延迟的cpu
+			} else if ((!idle || idle->exit_latency == min_exit_latency) && 
+				   rq->idle_stamp > latest_idle_timestamp) { //idle退出延迟相等，则记录idle的时间更晚的
 				/*
 				 * If equal or no active idle state, then
 				 * the most recently idled CPU might have
@@ -6076,10 +6136,10 @@ find_idlest_group_cpu(struct sched_group *group, struct task_struct *p, int this
 				latest_idle_timestamp = rq->idle_stamp;
 				shallowest_idle_cpu = i;
 			}
-		} else if (shallowest_idle_cpu == -1) {
+		} else if (shallowest_idle_cpu == -1) { //对于非idle类型的cpu,并且之前也没有遍历到idle cpu
 			load = cpu_load(cpu_rq(i));
 			if (load < min_load) {
-				min_load = load;
+				min_load = load; //记录load最小的cpu
 				least_loaded_cpu = i;
 			}
 		}
@@ -6088,11 +6148,20 @@ find_idlest_group_cpu(struct sched_group *group, struct task_struct *p, int this
 	return shallowest_idle_cpu != -1 ? shallowest_idle_cpu : least_loaded_cpu;
 }
 
+/*
+ * 只有fork或exec的选核才可能走这个函数。
+ *
+ * 传参：sd当前cpu对应的DIE层级的sd(只可能是DIE层级); p是待选核任务; cpu为当前cpu; prev_cpu为任务p之前运行的cpu; 
+ * sd_flag表示哪种选核类型。
+ *
+ * 作用：在最idle的sg中找出最idle的cpu, 若是没找到就返回当前cpu.
+ */
 static inline int find_idlest_cpu(struct sched_domain *sd, struct task_struct *p,
 				  int cpu, int prev_cpu, int sd_flag)
 {
 	int new_cpu = cpu;
 
+	//这个sd中的所有cpu都不在任务p的cpu亲和性里面
 	if (!cpumask_intersects(sched_domain_span(sd), p->cpus_ptr))
 		return prev_cpu;
 
@@ -6100,25 +6169,31 @@ static inline int find_idlest_cpu(struct sched_domain *sd, struct task_struct *p
 	 * We need task's util for cpu_util_without, sync it up to
 	 * prev_cpu's last_update_time.
 	 */
+	//仅对于exec类型的选核更新任务的负载
 	if (!(sd_flag & SD_BALANCE_FORK))
 		sync_entity_load_avg(&p->se);
 
+	// 从当前CPU的DIE向MC遍历
 	while (sd) {
 		struct sched_group *group;
 		struct sched_domain *tmp;
 		int weight;
 
+		//恒不成立,因为fork或exec类型的选核MC/DIE都支持
 		if (!(sd->flags & sd_flag)) {
 			sd = sd->child;
 			continue;
 		}
 
+		//sd中找idlest sched_group
+		// 如果sd为DIE且返回null，会继续在当前cpu所在的MC sd中的groups里找
 		group = find_idlest_group(sd, p, cpu);
 		if (!group) {
 			sd = sd->child;
 			continue;
 		}
 
+		//在idlest sched_group找idlest的cpu
 		new_cpu = find_idlest_group_cpu(group, p, cpu);
 		if (new_cpu == cpu) {
 			/* Now try balancing at a lower domain level of 'cpu': */
@@ -6131,6 +6206,9 @@ static inline int find_idlest_cpu(struct sched_domain *sd, struct task_struct *p
 		weight = sd->span_weight;
 		sd = NULL;
 		for_each_domain(cpu, tmp) {
+			// tmp第一次循环为mc，tmp->span_weight = 4
+			// 如果外层循环的sd为mc，则退出；
+			// 如果外层循环的sd为die =》 则外层循环的sd设置为new_cpu的mc sd，继续找
 			if (weight <= tmp->span_weight)
 				break;
 			if (tmp->flags & sd_flag)
@@ -6328,6 +6406,7 @@ static int select_idle_cpu(struct task_struct *p, struct sched_domain *sd, int t
  * the task fits. If no CPU is big enough, but there are idle ones, try to
  * maximize capacity.
  */
+// 作用：从target_cpu开始遍历，找一个能容纳下任务p的idle cpu, 若所有idle cpu都不能容纳下任务，就返回算力最大的idle cpu,
 static int
 select_idle_capacity(struct task_struct *p, struct sched_domain *sd, int target)
 {
@@ -6340,6 +6419,7 @@ select_idle_capacity(struct task_struct *p, struct sched_domain *sd, int target)
 
 	task_util = uclamp_task_util(p);
 
+	//这里从target_cpu开始遍历，利用了之前判断的结果target_cpu的算力是能容纳任务p的
 	for_each_cpu_wrap(cpu, cpus, target) {
 		unsigned long cpu_cap = capacity_of(cpu);
 
@@ -6376,6 +6456,7 @@ static int select_idle_sibling(struct task_struct *p, int prev, int target)
 
 	/*
 	 * On asymmetric system, update task utilization because we will check
+	 * 非对称系统，大小核
 	 * that the task fits with cpu's capacity.
 	 */
 	if (static_branch_unlikely(&sched_asym_cpucapacity)) {
@@ -6390,6 +6471,7 @@ static int select_idle_sibling(struct task_struct *p, int prev, int target)
 	/*
 	 * If the previous CPU is cache affine and idle, don't be stupid:
 	 */
+	// cpus_share_cache 判断的是sd_llc_id，是否属于同一MC domain
 	if (prev != target && cpus_share_cache(prev, target) &&
 	    (available_idle_cpu(prev) || sched_idle_cpu(prev)) &&
 	    asym_fits_capacity(task_util, prev))
@@ -6412,6 +6494,14 @@ static int select_idle_sibling(struct task_struct *p, int prev, int target)
 	}
 
 	/* Check a recently used CPU as a potential idle candidate: */
+	/*
+     * recent_used_cpu的更新位置：
+     * select_task_rq_fair: 更新 current->recent_used_cpu 为当前正在运行的cpu
+     * select_idle_sibling: 将待选核任务 p->recent_used_cpu 设置为 prev_cpu
+     *
+     * 若 p->recent_used_cpu 既不是prev_cpu也不是target_cpu, 但是是和target_cpu共cluster的，且是idle的, 且任务的亲和性允许，
+     * 且算力能够容纳任务，那么就选 p->recent_used_cpu。
+     */
 	recent_used_cpu = p->recent_used_cpu;
 	if (recent_used_cpu != prev &&
 	    recent_used_cpu != target &&
@@ -6424,7 +6514,7 @@ static int select_idle_sibling(struct task_struct *p, int prev, int target)
 		 * candidate for the next wake:
 		 */
 		p->recent_used_cpu = prev;
-		return recent_used_cpu;
+		return recent_used_cpu; //还将p放在它最近使用过的cpu上
 	}
 
 	if (IS_ENABLED(CONFIG_ROCKCHIP_PERFORMANCE)) {
@@ -6437,7 +6527,7 @@ static int select_idle_sibling(struct task_struct *p, int prev, int target)
 	 * sd_asym_cpucapacity rather than sd_llc.
 	 */
 	if (static_branch_unlikely(&sched_asym_cpucapacity)) {
-		sd = rcu_dereference(per_cpu(sd_asym_cpucapacity, target));
+		sd = rcu_dereference(per_cpu(sd_asym_cpucapacity, target)); //target_cpu对应的DIE sd
 		/*
 		 * On an asymmetric CPU capacity system where an exclusive
 		 * cpuset defines a symmetric island (i.e. one unique
@@ -6453,19 +6543,21 @@ static int select_idle_sibling(struct task_struct *p, int prev, int target)
 	}
 
 sd_llc:
+	// target_cpu对应的MC层级的sd
 	sd = rcu_dereference(per_cpu(sd_llc, target));
 	if (!sd)
 		return target;
 
-	i = select_idle_core(p, sd, target);
+	i = select_idle_core(p, sd, target); //CONFIG_SCHED_SMT没定义为空函数
 	if ((unsigned)i < nr_cpumask_bits)
 		return i;
 
+	// 在同一个MC sd中选择idle的cpu, 当avg idle大于scan cost时
 	i = select_idle_cpu(p, sd, target);
 	if ((unsigned)i < nr_cpumask_bits)
 		return i;
 
-	i = select_idle_smt(p, sd, target);
+	i = select_idle_smt(p, sd, target); //CONFIG_SCHED_SMT没定义为空函数
 	if ((unsigned)i < nr_cpumask_bits)
 		return i;
 
@@ -6968,6 +7060,7 @@ select_task_rq_fair(struct task_struct *p, int prev_cpu, int sd_flag, int wake_f
 	if (trace_android_rvh_select_task_rq_fair_enabled() &&
 	    !(sd_flag & SD_BALANCE_FORK))
 		sync_entity_load_avg(&p->se);
+	// Vendor可以注册HOOK来决定是否执行这个原生的选核流程，若注册了且选到了核，则原生选核流程不再执行。否则执行原生选核流程。
 	trace_android_rvh_select_task_rq_fair(p, prev_cpu, sd_flag,
 			wake_flags, &target_cpu);
 	if (target_cpu >= 0)
@@ -6981,7 +7074,10 @@ select_task_rq_fair(struct task_struct *p, int prev_cpu, int sd_flag, int wake_f
 				goto no_eas;
 		}
 
+		// 是否进程eas选核，必须是唤醒场景的选核，fork和exec场景的选核都不会走EAS
+		// EAS全局控制开关/proc/sys/kernel/sched_energy_aware必须是开启的
 		if (sched_energy_enabled()) {
+			// 系统没有overutilized，若是overutilized则直接退出EAS选核
 			new_cpu = find_energy_efficient_cpu(p, prev_cpu, sync);
 			if (new_cpu >= 0)
 				return new_cpu;
@@ -6989,36 +7085,44 @@ select_task_rq_fair(struct task_struct *p, int prev_cpu, int sd_flag, int wake_f
 		}
 
 no_eas:
+		// 主要判断当前任务与被唤醒任务之间是否有比较固定的唤醒关系，来帮助选出一个候选cpu
 		want_affine = !wake_wide(p) && cpumask_test_cpu(cpu, p->cpus_ptr);
 	}
 
 	rcu_read_lock();
+	// 遍历当前cpu的domain 从mc->die
 	for_each_domain(cpu, tmp) {
 		/*
 		 * If both 'cpu' and 'prev_cpu' are part of this domain,
 		 * cpu is a valid SD_WAKE_AFFINE target.
 		 */
+		// 主要看want_affine，其他条件恒成立
 		if (want_affine && (tmp->flags & SD_WAKE_AFFINE) &&
 		    cpumask_test_cpu(prev_cpu, sched_domain_span(tmp))) {
+			//若当前cpu就是任务p之前运行的prev_cpu, 不用调用wake_affine()选核了 new_cpu = prev_cpu
 			if (cpu != prev_cpu)
-				new_cpu = wake_affine(tmp, p, cpu, prev_cpu, sync);
+				new_cpu = wake_affine(tmp, p, cpu, prev_cpu, sync); // wake_affine在this_cpu和prev_cpu中选出一个作为候选
 
 			sd = NULL; /* Prefer wake_affine over balance flags */
 			break;
 		}
-
+		// tmp->flags 不会包含 SD_BALANCE_WAKE, 因为MC和DIE都没设置这个标志。
+		// 只有 SD_BALANCE_FORK、SD_BALANCE_EXEC 选核才有可能赋值
 		if (tmp->flags & sd_flag)
-			sd = tmp;
+			sd = tmp; // 找到支持sd_flag的最高层级的sd， 即DIE
 		else if (!want_affine)
 			break;
 	}
 
-	if (unlikely(sd)) {
+	//SD_BALANCE_WAKE这类休眠唤醒的任务选核不可能走慢速路径，因为sd恒为NULL
+	// fork和exec两类选核流程走slow path，唤醒任务走fast path
+	if (unlikely(sd)) { 
 		/* Slow path */
+		// 这里sd是DIE sd
 		new_cpu = find_idlest_cpu(sd, p, cpu, prev_cpu, sd_flag);
 	} else if (sd_flag & SD_BALANCE_WAKE) { /* XXX always ? */
 		/* Fast path */
-
+		// 虽然名字叫select_idle_sibling，但是在同cluster中选不到idle核时，还是会在所有cluster中进行选核
 		new_cpu = select_idle_sibling(p, prev_cpu, new_cpu);
 
 		if (IS_ENABLED(CONFIG_ROCKCHIP_PERFORMANCE)) {
@@ -9107,6 +9211,8 @@ static bool update_pick_idlest(struct sched_group *idlest,
  *
  * Assumes p is allowed on at least one CPU in sd.
  */
+// 从sched domain下的group找idlest group
+//返回值null，为local group（this cpu所在的group），否则返回下面最idlest的group
 static struct sched_group *
 find_idlest_group(struct sched_domain *sd, struct task_struct *p, int this_cpu)
 {
@@ -9122,6 +9228,7 @@ find_idlest_group(struct sched_domain *sd, struct task_struct *p, int this_cpu)
 	imbalance = scale_load_down(NICE_0_LOAD) *
 				(sd->imbalance_pct-100) / 100;
 
+	// 遍历sd->groups
 	do {
 		int local_group;
 
@@ -9136,23 +9243,28 @@ find_idlest_group(struct sched_domain *sd, struct task_struct *p, int this_cpu)
 				continue;
 		}
 
+		// sched_group_span(group)： sched_group中包含的CPUs
+		// p->cpus_ptr : 进程亲和的CPUs
+		// cpumask_intersects 求交集
 		/* Skip over this group if it has no CPUs allowed */
 		if (!cpumask_intersects(sched_group_span(group),
 					p->cpus_ptr))
 			continue;
-
+		// 1. 找到local_group，即this_cpu所在的grop
 		local_group = cpumask_test_cpu(this_cpu,
 					       sched_group_span(group));
 
 		if (local_group) {
 			sgs = &local_sgs;
-			local = group;
+			local = group; // local中记录包含当前this_cpu的group
 		} else {
 			sgs = &tmp_sgs;
 		}
 
+		// 更新sched group统计数据sgs
 		update_sg_wakeup_stats(sd, group, sgs, p);
 
+		// 2. 找到idlest group
 		if (!local_group && update_pick_idlest(idlest, &idlest_sgs, group, sgs)) {
 			idlest = group;
 			idlest_sgs = *sgs;
@@ -9162,10 +9274,12 @@ find_idlest_group(struct sched_domain *sd, struct task_struct *p, int this_cpu)
 
 
 	/* There is no idlest group to push tasks to */
+	//若没找到idlest sg，选local group
 	if (!idlest)
 		return NULL;
 
 	/* The local group has been skipped because of CPU affinity */
+	//此sd中若没有local group就直接返回idlest，否则还要和local group再PK一下，此例中，local group恒存在的
 	if (!local)
 		return idlest;
 
@@ -9173,6 +9287,7 @@ find_idlest_group(struct sched_domain *sd, struct task_struct *p, int this_cpu)
 	 * If the local group is idler than the selected idlest group
 	 * don't try and push the task.
 	 */
+	//local group 更idle
 	if (local_sgs.group_type < idlest_sgs.group_type)
 		return NULL;
 
@@ -9183,6 +9298,7 @@ find_idlest_group(struct sched_domain *sd, struct task_struct *p, int this_cpu)
 	if (local_sgs.group_type > idlest_sgs.group_type)
 		return idlest;
 
+	//local group和idlest group一样闲的情况：
 	switch (local_sgs.group_type) {
 	case group_overloaded:
 	case group_fully_busy:
@@ -9203,9 +9319,11 @@ find_idlest_group(struct sched_domain *sd, struct task_struct *p, int this_cpu)
 		 * If the local group is less loaded than the selected
 		 * idlest group don't try and push any tasks.
 		 */
+		//最闲的sg和local sg的load差值大于阈值17*1024，选local group
 		if (idlest_sgs.avg_load >= (local_sgs.avg_load + imbalance))
 			return NULL;
 
+		 //local_avg_load/idlest_avg_load <= sd->imbalance_pct%，选local group
 		if (100 * local_sgs.avg_load <= sd->imbalance_pct * idlest_sgs.avg_load)
 			return NULL;
 		break;
@@ -9243,7 +9361,7 @@ find_idlest_group(struct sched_domain *sd, struct task_struct *p, int this_cpu)
 			 * take care of it.
 			 */
 			if (local_sgs.idle_cpus)
-				return NULL;
+				return NULL; //若local sg有idle cpu存在，选local group
 		}
 
 		/*
@@ -9252,6 +9370,7 @@ find_idlest_group(struct sched_domain *sd, struct task_struct *p, int this_cpu)
 		 * up that the group has less spare capacity but finally more
 		 * idle CPUs which means more opportunity to run task.
 		 */
+		//若local sg的idle cpu个数比idlest sg更多，选local group
 		if (local_sgs.idle_cpus >= idlest_sgs.idle_cpus)
 			return NULL;
 		break;

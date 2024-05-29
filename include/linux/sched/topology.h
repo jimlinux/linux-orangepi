@@ -138,7 +138,7 @@ struct sched_domain {
 	unsigned int ttwu_move_balance;
 #endif
 #ifdef CONFIG_SCHED_DEBUG
-	char *name;
+	char *name;  // MC or DIE
 #endif
 	union {
 		void *private;		/* used during construction */
@@ -146,7 +146,7 @@ struct sched_domain {
 	};
 	struct sched_domain_shared *shared;
 
-	unsigned int span_weight;
+	unsigned int span_weight; // 该调度域下包含的cpu数量
 
 	ANDROID_KABI_RESERVE(1);
 	ANDROID_KABI_RESERVE(2);
@@ -158,6 +158,8 @@ struct sched_domain {
 	 * by attaching extra space to the end of the structure,
 	 * depending on how many CPUs the kernel has booted up with)
 	 */
+	// 该调度域下包含的cpu号，比如一个MC调度域，cpu6,cpu7 则值为0xc0 （11000000）
+	// 如果是DIE调度域，则包含全部，0xff
 	unsigned long span[];
 };
 

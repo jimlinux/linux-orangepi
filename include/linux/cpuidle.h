@@ -53,7 +53,7 @@ struct cpuidle_state {
 	u64		exit_latency_ns;
 	u64		target_residency_ns;
 	unsigned int	flags;
-	unsigned int	exit_latency; /* in US */
+	unsigned int	exit_latency; /* in US */  // 表示处理器从idle状态退出并返回工作状态所需要的时间
 	int		power_usage; /* in mW */
 	unsigned int	target_residency; /* in US */
 
