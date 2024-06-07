@@ -8138,7 +8138,7 @@ static void cpu_util_update_eff(struct cgroup_subsys_state *css)
 			/* Assume effective clamps matches requested clamps */
 			eff[clamp_id] = css_tg(css)->uclamp_req[clamp_id].value;
 			/* Cap effective clamps with parent's effective clamps */
-			if (uc_parent &&
+			if (uc_parent && clamp_id == UCLAMP_MAX &&
 			    eff[clamp_id] > uc_parent[clamp_id].value) {
 				eff[clamp_id] = uc_parent[clamp_id].value;
 			}
