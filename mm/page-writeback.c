@@ -820,6 +820,7 @@ static long long pos_ratio_polynom(unsigned long setpoint,
 	pos_ratio = pos_ratio * x >> RATELIMIT_CALC_SHIFT;
 	pos_ratio += 1 << RATELIMIT_CALC_SHIFT;
 
+	// pos_ratio在[0, 2]之前取值
 	return clamp(pos_ratio, 0LL, 2LL << RATELIMIT_CALC_SHIFT);
 }
 
@@ -895,7 +896,7 @@ static long long pos_ratio_polynom(unsigned long setpoint,
  * The wb control line won't drop below pos_ratio=1/4, so that wb_dirty can
  * be smoothly throttled down to normal if it starts high in situations like
  * - start writing to a slow SD card and a fast disk at the same time. The SD
- *   card's wb_dirty may rush to many times higher than wb_setpoint.
+ *   card's wb_dirty may rush to many times higher than wb_setpoint. // 避免直接限死，导致app持续pause
  * - the wb dirty thresh drops quickly due to change of JBOD workload
  */
 static void wb_position_ratio(struct dirty_throttle_control *dtc)
@@ -950,6 +951,10 @@ static void wb_position_ratio(struct dirty_throttle_control *dtc)
 	 * much earlier than global "freerun" is reached (~23MB vs. ~2.3GB
 	 * in the example above).
 	 */
+	// 由于fuse处理回写时消耗额外的内存，这些内存不计入nr_dirty，而是NR_WRITEBACK_TEMP
+	// gdtc->dirty = nr_reclaimable + global_node_page_state(NR_WRITEBACK); 不包含NR_WRITEBACK_TEMP
+	// 所以fuse限制更严格，只要dtc->wb_dirty >= wb_thresh 就设置dtc->pos_ratio=0，强制pause
+	// 即便此时总的dirty页在freerun状态。
 	if (unlikely(wb->bdi->capabilities & BDI_CAP_STRICTLIMIT)) {
 		long long wb_pos_ratio;
 
@@ -1036,10 +1041,11 @@ static void wb_position_ratio(struct dirty_throttle_control *dtc)
 	 * threshold, so that the occasional writes won't be blocked and active
 	 * writes can rampup the threshold quickly.
 	 */
+	// 这里指出wb_thresh很可能是0，原因是写入是inactive的，并非很慢！！！
 	wb_thresh = max(wb_thresh, (limit - dtc->dirty) / 8);
 	/*
 	 * scale global setpoint to wb's:
-	 *	wb_setpoint = setpoint * wb_thresh / thresh
+	 *	wb_setpoint = setpoint * wb_thresh / thresh // 按wb_thresh / thresh比例计算wb_setpoint
 	 */
 	x = div_u64((u64)wb_thresh << 16, dtc->thresh | 1);
 	wb_setpoint = setpoint * (u64)x >> 16;
@@ -1051,8 +1057,9 @@ static void wb_position_ratio(struct dirty_throttle_control *dtc)
 	 * span = --------- * (8 * write_bw) + ------------------ * wb_thresh
 	 *         thresh                           thresh
 	 */
+	// 构造span，当系统只有一个wb时，wb_thresh==thresh， =》 span=(8*write_bw)
 	span = (dtc->thresh - wb_thresh + 8 * write_bw) * (u64)x >> 16;
-	x_intercept = wb_setpoint + span;
+	x_intercept = wb_setpoint + span; // x_intercept: 方程与x轴的截距
 
 	if (dtc->wb_dirty < x_intercept - span / 4) {
 		pos_ratio = div64_u64(pos_ratio * (x_intercept - dtc->wb_dirty),
@@ -1065,9 +1072,16 @@ static void wb_position_ratio(struct dirty_throttle_control *dtc)
 	 * It may push the desired control point of global dirty pages higher
 	 * than setpoint.
 	 */
+	/*
+	这段注释说明了写缓冲区保留区的存在是为了防止脏页池耗尽和磁盘空闲的情况。
+	为了实现这一目的，系统可能会将全局脏页数的期望控制点设置得比预定值更高，
+	以确保有足够的脏页在写缓冲区中，从而维持磁盘的写入操作和系统性能。
+	*/
+	// 对于wb_dirty < wb_thresh / 2, 调大pos_ratio，乘数在(1, 8]，保持一定数量的脏页，有助于提高系统性能；
 	x_intercept = wb_thresh / 2;
 	if (dtc->wb_dirty < x_intercept) {
 		if (dtc->wb_dirty > x_intercept / 8)
+			// pos_ratio = pos_ratio * (1, 8)
 			pos_ratio = div_u64(pos_ratio * x_intercept,
 					    dtc->wb_dirty);
 		else
@@ -1219,7 +1233,7 @@ static void wb_update_dirty_ratelimit(struct dirty_throttle_control *dtc,
 	 * formula will yield the balanced rate limit (write_bw / N).
 	 *
 	 * Note that the expanded form is not a pure rate feedback:
-	 *	rate_(i+1) = rate_(i) * (write_bw / dirty_rate)		     (1)
+	 *	rate_(i+1) = rate_(i) * (write_bw / dirty_rate)		     (1) // rate_ is dirty_ratelimit
 	 * but also takes pos_ratio into account:
 	 *	rate_(i+1) = rate_(i) * (write_bw / dirty_rate) * pos_ratio  (2)
 	 *
@@ -1235,13 +1249,18 @@ static void wb_update_dirty_ratelimit(struct dirty_throttle_control *dtc,
 	 * put (6) into (1) we get
 	 *	rate_(i+1) = rate_(i)					     (7)
 	 *
+	 * 
 	 * So we end up using (2) to always keep
 	 *	rate_(i+1) ~= (write_bw / N)				     (8)
 	 * regardless of the value of pos_ratio. As long as (8) is satisfied,
 	 * pos_ratio is able to drive itself to 1.0, which is not only where
-	 * the dirty count meet the setpoint, but also where the slope of
-	 * pos_ratio is most flat and hence task_ratelimit is least fluctuated.
+	 * the dirty count meet the setpoint, but also where the slope of // slope：斜率
+	 * pos_ratio is most flat and hence task_ratelimit is least fluctuated. // least fluctuated： 最少的波动
 	 */
+	// 核心计算方法：
+	// dirty_rate = N * task_ratelimit => N = dirty_rate / task_ratelimit
+	// balanced_dirty_ratelimit = write_bw / N
+	// => balanced_dirty_ratelimit = task_ratelimit * write_bw / dirty_rate
 	balanced_dirty_ratelimit = div_u64((u64)task_ratelimit * write_bw,
 					   dirty_rate | 1);
 	/*
@@ -1256,7 +1275,7 @@ static void wb_update_dirty_ratelimit(struct dirty_throttle_control *dtc,
 	 *	wb->dirty_ratelimit = balanced_dirty_ratelimit;
 	 *
 	 * However to get a more stable dirty_ratelimit, the below elaborated
-	 * code makes use of task_ratelimit to filter out singular points and
+	 * code makes use of task_ratelimit to filter out singular points and // 过滤掉singular，特异点
 	 * limit the step size.
 	 *
 	 * The below code essentially only uses the relative value of
@@ -1297,6 +1316,7 @@ static void wb_update_dirty_ratelimit(struct dirty_throttle_control *dtc,
 	 * it's possible that wb_thresh is close to zero due to inactivity
 	 * of backing device.
 	 */
+	// STRICTLIMIT要单独计算setpoint，不能用setpoint = (freerun + limit) / 2;
 	if (unlikely(wb->bdi->capabilities & BDI_CAP_STRICTLIMIT)) {
 		dirty = dtc->wb_dirty;
 		if (dtc->wb_dirty < 8)
@@ -1305,6 +1325,11 @@ static void wb_update_dirty_ratelimit(struct dirty_throttle_control *dtc,
 			setpoint = (dtc->wb_thresh + dtc->wb_bg_thresh) / 2;
 	}
 
+	// 作用是过滤balanced_dirty_ratelimit偏离较大的离散点
+	// 当dirty < setpoint, dirty=>setpoint，趋向是增加drity，达到setpoint，所以在
+	// wb->balanced_dirty_ratelimit, balanced_dirty_ratelimit, task_ratelimit中取最小值x，如果x都>dirty_ratelimit
+	// 说明此次有必要更新dirty_ratelimit，记下step，后面用来增加dirty_ratelimit。
+	// 对于x<=dirty_ratelimit忽略，不更新dirty_ratelimit
 	if (dirty < setpoint) {
 		x = min3(wb->balanced_dirty_ratelimit,
 			 balanced_dirty_ratelimit, task_ratelimit);
@@ -1320,8 +1345,9 @@ static void wb_update_dirty_ratelimit(struct dirty_throttle_control *dtc,
 	/*
 	 * Don't pursue 100% rate matching. It's impossible since the balanced
 	 * rate itself is constantly fluctuating. So decrease the track speed
-	 * when it gets close to the target. Helps eliminate pointless tremors.
+	 * when it gets close to the target. Helps eliminate pointless tremors. // 消除无意义的抖动
 	 */
+	// 控制step值在一定范围内波动， 小step丢掉，大step缩小
 	shift = dirty_ratelimit / (2 * step + 1);
 	if (shift < BITS_PER_LONG)
 		step = DIV_ROUND_UP(step >> shift, 8);
@@ -1539,7 +1565,11 @@ static inline void wb_dirty_limits(struct dirty_throttle_control *dtc)
 	 * actually dirty; with m+n sitting in the percpu
 	 * deltas.
 	 */
-	if (dtc->wb_thresh < 2 * wb_stat_error()) {
+	if (dtc->wb_thresh < 2 * wb_stat_error()) { // wb_stat_error() = 256
+		// wb_stat_sum 更准确
+		// wb_stat 是 percpu_counter.count
+		// wb_stat_sum 是percpu_counter.count + 每个cpu上未update到count的percpu_counter.counters之和。
+		// percpu_counter每个cpu有各自变量，平常更新到各自的变量，当超过一个值再更新到总count上；所以wb_stat_sum更准确；
 		wb_reclaimable = wb_stat_sum(wb, WB_RECLAIMABLE);
 		dtc->wb_dirty = wb_reclaimable + wb_stat_sum(wb, WB_WRITEBACK);
 	} else {
@@ -1560,10 +1590,10 @@ static void balance_dirty_pages(struct bdi_writeback *wb,
 {
 	struct dirty_throttle_control gdtc_stor = { GDTC_INIT(wb) };
 	struct dirty_throttle_control mdtc_stor = { MDTC_INIT(wb, &gdtc_stor) };
-	struct dirty_throttle_control * const gdtc = &gdtc_stor;
-	struct dirty_throttle_control * const mdtc = mdtc_valid(&mdtc_stor) ?
+	struct dirty_throttle_control * const gdtc = &gdtc_stor; // global domain
+	struct dirty_throttle_control * const mdtc = mdtc_valid(&mdtc_stor) ? // memcg domain
 						     &mdtc_stor : NULL;
-	struct dirty_throttle_control *sdtc;
+	struct dirty_throttle_control *sdtc; // select from gdtc or mdtc
 	unsigned long nr_reclaimable;	/* = file_dirty */
 	long period;
 	long pause;
@@ -1585,15 +1615,22 @@ static void balance_dirty_pages(struct bdi_writeback *wb,
 		unsigned long m_bg_thresh = 0;
 
 		nr_reclaimable = global_node_page_state(NR_FILE_DIRTY);
+		// 可用于脏页的内存 = free page - reserved + NR_INACTIVE_FILE + NR_ACTIVE_FILE
 		gdtc->avail = global_dirtyable_memory();
+		// 当前linux系统全部脏页，global_node_page_state(NR_WRITEBACK)为回写处理中的脏页
 		gdtc->dirty = nr_reclaimable + global_node_page_state(NR_WRITEBACK);
 
+		// 根据配置dirty_background_ratio、dirty_ratio计算thresh and bg_thresh
+		// bg_thresh = dirty_background_ratio * gdtc->avail， 默认10%，考虑是否启动回写任务；
+		// thresh = dirty_ratio * gdtc->avail， 默认40%，考虑是否要对进程pause
 		domain_dirty_limits(gdtc);
 
 		if (unlikely(strictlimit)) {
+			// 如果设置strictlimit flag，如fuse，则要按照块设备的数据来计算dirty和thresh
+			// why ？ 因为像fuse，脏页计入NR_WRITEBACK_TEMP，gdtc->dirty不包含，所以要特殊处理
 			wb_dirty_limits(gdtc);
 
-			dirty = gdtc->wb_dirty;
+			dirty = gdtc->wb_dirty; // 块设备上的脏页
 			thresh = gdtc->wb_thresh;
 			bg_thresh = gdtc->wb_bg_thresh;
 		} else {
@@ -1602,6 +1639,7 @@ static void balance_dirty_pages(struct bdi_writeback *wb,
 			bg_thresh = gdtc->bg_thresh;
 		}
 
+		// memcg blkio相关限制
 		if (mdtc) {
 			unsigned long filepages, headroom, writeback;
 
@@ -1643,6 +1681,7 @@ static void balance_dirty_pages(struct bdi_writeback *wb,
 		 * If memcg domain is in effect, @dirty should be under
 		 * both global and memcg freerun ceilings.
 		 */
+		// dirty_freerun_ceiling = (thresh + bg_thresh) / 2
 		if (dirty <= dirty_freerun_ceiling(thresh, bg_thresh) &&
 		    (!mdtc ||
 		     m_dirty <= dirty_freerun_ceiling(m_thresh, m_bg_thresh))) {
@@ -1650,6 +1689,7 @@ static void balance_dirty_pages(struct bdi_writeback *wb,
 			unsigned long m_intv;
 
 free_running:
+			// free run意思是不pause进程，break出循环后，也会唤醒回写进程；
 			intv = dirty_poll_interval(dirty, thresh);
 			m_intv = ULONG_MAX;
 
@@ -1657,10 +1697,14 @@ free_running:
 			current->nr_dirtied = 0;
 			if (mdtc)
 				m_intv = dirty_poll_interval(m_dirty, m_thresh);
+			// 用于 balance_dirty_pages_ratelimited 快速判断是否调用balance_dirty_pages
+			// current->nr_dirtied >= current->nr_dirtied_pause, 则调用。
+			// nr_dirtied:当前进程写脏页计数，在account_page_dirtied中统计；
 			current->nr_dirtied_pause = min(intv, m_intv);
 			break;
 		}
 
+		// 总dirty page已经超过dirty_freerun_ceiling，启动后台回写任务
 		if (unlikely(!writeback_in_progress(wb)))
 			wb_start_background_writeback(wb);
 
@@ -1671,8 +1715,9 @@ free_running:
 		 * global dtc by default.
 		 */
 		if (!strictlimit) {
+			// 计算块设备bdi的dirty数量和水位线:wb_thresh
 			wb_dirty_limits(gdtc);
-
+			// 块设备的dirty没有达到水位线，free run，说明不是当前进程写块设备造成的脏页过多，不需要pause当前进程
 			if ((current->flags & PF_LOCAL_THROTTLE) &&
 			    gdtc->wb_dirty <
 			    dirty_freerun_ceiling(gdtc->wb_thresh,
@@ -1684,9 +1729,11 @@ free_running:
 				goto free_running;
 		}
 
+		// 总dirty和块dirty都超过对应的thresh，标记为dirty_exceeded，后面的逻辑是计算pause时间
 		dirty_exceeded = (gdtc->wb_dirty > gdtc->wb_thresh) &&
 			((gdtc->dirty > gdtc->thresh) || strictlimit);
 
+		// 计算pos_ratio
 		wb_position_ratio(gdtc);
 		sdtc = gdtc;
 
@@ -1722,14 +1769,25 @@ free_running:
 		if (dirty_exceeded && !wb->dirty_exceeded)
 			wb->dirty_exceeded = 1;
 
+		// 当前时间超过bandwidth统计周期，update
 		if (time_is_before_jiffies(wb->bw_time_stamp +
 					   BANDWIDTH_INTERVAL)) {
 			spin_lock(&wb->list_lock);
+			// -> domain_update_bandwidth 更新写入带宽数据
+			// -> wb_update_dirty_ratelimit 更新dirty_ratelimit
 			__wb_update_bandwidth(gdtc, mdtc, start_time, true);
 			spin_unlock(&wb->list_lock);
 		}
 
 		/* throttle according to the chosen dtc */
+		// balanced_ratelimit = write_bandwidth / N
+		// dirty_ratelimit: base dirty throttle rate， updated torwards balanced_ratelimit
+		// dirty_ratelimit可以理解为块设备总体脏页增长率限制水位线，约等于磁盘写入write_bandwidth/N，N为写入进程数；
+		// pos_ratio可以理解为控制比率，用于控制脏页水位在setpoint附近；
+		// setpoint 把脏页数量降低到的目标值
+		// = 1.0 if at setpoint
+		// > 1.0 if below setpoint
+		// < 1.0 if above setpoint
 		dirty_ratelimit = wb->dirty_ratelimit;
 		task_ratelimit = ((u64)dirty_ratelimit * sdtc->pos_ratio) >>
 							RATELIMIT_CALC_SHIFT;
@@ -1745,6 +1803,9 @@ free_running:
 		}
 		period = HZ * pages_dirtied / task_ratelimit;
 		pause = period;
+		// dirty_paused_when 是上次调用balance_dirty_pages的时间
+		// 距离上次调用时间越短，pause时间越长；
+		// 距离上次调用时间越长，pause时间越短；
 		if (current->dirty_paused_when)
 			pause -= now - current->dirty_paused_when;
 		/*
@@ -1768,12 +1829,22 @@ free_running:
 						  min(pause, 0L),
 						  start_time);
 			if (pause < -HZ) {
+				// 与上次调用balance_dirty_pages太久，不pause
 				current->dirty_paused_when = now;
+				// 走到这里，已经启动后台回写了，current->nr_dirtied清零，后面的清零逻辑一样；
 				current->nr_dirtied = 0;
 			} else if (period) {
+				// pause -= now - current->dirty_paused_when;
+				// => pause = period - now + current->dirty_paused_when
+				// => current->dirty_paused_when + period = now + pause;
+				// so:
+				// current->dirty_paused_when += period
+				// 等同于 current->dirty_paused_when = now + pause;
+				// 留到下次再pause
 				current->dirty_paused_when += period;
 				current->nr_dirtied = 0;
 			} else if (current->nr_dirtied_pause <= pages_dirtied)
+				// 提高调用balance_dirty_pages的阈值
 				current->nr_dirtied_pause += pages_dirtied;
 			break;
 		}
@@ -1808,6 +1879,7 @@ pause:
 		 * This is typically equal to (dirty < thresh) and can also
 		 * keep "1000+ dd on a slow USB stick" under control.
 		 */
+		// 跳出for
 		if (task_ratelimit)
 			break;
 
@@ -1821,12 +1893,12 @@ pause:
 		 * more page. However wb_dirty has accounting errors.  So use
 		 * the larger and more IO friendly wb_stat_error.
 		 */
-		if (sdtc->wb_dirty <= wb_stat_error())
+		if (sdtc->wb_dirty <= wb_stat_error()) // wb_stat_error() = 256
 			break;
 
 		if (fatal_signal_pending(current))
 			break;
-	}
+	} // end for
 
 	if (!dirty_exceeded && wb->dirty_exceeded)
 		wb->dirty_exceeded = 0;
@@ -1896,6 +1968,8 @@ void balance_dirty_pages_ratelimited(struct address_space *mapping)
 	if (!wb)
 		wb = &bdi->wb;
 
+	// fork时置初值为32：p->nr_dirtied_pause = 128 >> (PAGE_SHIFT - 10);
+	// 涵义是进程写文件脏造成了脏页，进程是否进行pause检测的阈值
 	ratelimit = current->nr_dirtied_pause;
 	if (wb->dirty_exceeded)
 		ratelimit = min(ratelimit, 32 >> (PAGE_SHIFT - 10));
