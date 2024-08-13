@@ -952,6 +952,8 @@ static void wb_position_ratio(struct dirty_throttle_control *dtc)
 	 */
 	if (unlikely(wb->bdi->capabilities & BDI_CAP_STRICTLIMIT)) {
 		long long wb_pos_ratio;
+		unsigned long wb_bg_thresh, wb_max_thresh, wb_rampup_thresh;
+		unsigned long wb_min_ratio, wb_max_ratio;
 
 		if (dtc->wb_dirty < 8) {
 			dtc->pos_ratio = min_t(long long, pos_ratio * 2,
@@ -959,11 +961,17 @@ static void wb_position_ratio(struct dirty_throttle_control *dtc)
 			return;
 		}
 
+		wb_min_max_ratio(dtc->wb, &wb_min_ratio, &wb_max_ratio);
+		wb_max_thresh = (dtc->thresh * wb_max_ratio) / 100;
+		wb_rampup_thresh = (limit - dtc->dirty) / 8;
+		wb_thresh = max(dtc->wb_thresh, min(wb_rampup_thresh / 2, wb_max_thresh / 2));
+
 		if (dtc->wb_dirty >= wb_thresh)
 			return;
 
-		wb_setpoint = dirty_freerun_ceiling(wb_thresh,
-						    dtc->wb_bg_thresh);
+		wb_bg_thresh = dtc->thresh ?
+				div_u64((u64)wb_thresh * dtc->bg_thresh, dtc->thresh) : 0;
+		wb_setpoint = dirty_freerun_ceiling(wb_thresh, wb_bg_thresh);
 
 		if (wb_setpoint == 0 || wb_setpoint == wb_thresh)
 			return;
