@@ -105,6 +105,18 @@ struct wb_completion {
  * is tested for blkcg after lookup and removed from index on mismatch so
  * that a new wb for the combination can be created.
  */
+/*
+ * bdi_writeback: bdi回写相关数据
+ * cgroup writeback disable：bdi与wb为一对一
+ * cgroup writeback enable：一个bdi可以有多个wb
+ * cgroup writeback feature用来支持cgroup回写限速, 比较复杂暂不讨论
+ * 参考：https://www.alibabacloud.com/help/zh/alinux/user-guide/enable-the-cgroup-writeback-feature
+ * 需要memcg和blkcg协同工作
+ * memcg和blkcg规则：
+ * 1. 一对一：属于同一个memcg的进程A、B，只能映射到同一个blkcg
+ * 2. 多对一：属于不同memcg的进程A、B，可以映射到同一个blkcg，也可以映射到不同blkcg
+ * 3. 一个memcg - blkcg combination 对应一个cgroup wb
+*/
 struct bdi_writeback {
 	struct backing_dev_info *bdi;	/* our parent bdi */
 
@@ -121,10 +133,15 @@ struct bdi_writeback {
 
 	unsigned long congested;	/* WB_[a]sync_congested flags */
 
+	// 上次update bandwidth时间戳
 	unsigned long bw_time_stamp;	/* last time write bw is updated */
+	// 上次update bandwidth时，dirtied值
 	unsigned long dirtied_stamp;
+	// 上次update bandwidth时，written值
 	unsigned long written_stamp;	/* pages written at bw_time_stamp */
+	// 回写带宽
 	unsigned long write_bandwidth;	/* the estimated write bandwidth */
+	// 平滑后的回写带宽
 	unsigned long avg_write_bandwidth; /* further smoothed write bw, > 0 */
 
 	/*
@@ -133,15 +150,24 @@ struct bdi_writeback {
 	 * @dirty_ratelimit tracks the estimated @balanced_dirty_ratelimit
 	 * in small steps and is much more smooth/stable than the latter.
 	 */
+	// 平滑后的限速值，单位pages/s
 	unsigned long dirty_ratelimit;
+	// 原始限速值
 	unsigned long balanced_dirty_ratelimit;
 
+	/*
+	 * percpu计数，回写完成一个page，+1
+	 * 注意，计数先累加到percpu的count，当超过max_prop_frac后才会更新到总count，取总count有一定误差；
+	 * completions不一定递增的，为了保证时效性，会随根据设置的周期衰减
+	*/
 	struct fprop_local_percpu completions;
+	// dirty pages数是否超过thresh，超过后会更频繁调用balance_dirty_pages
 	int dirty_exceeded;
 	enum wb_reason start_all_reason;
 
 	spinlock_t work_lock;		/* protects work_list & dwork scheduling */
 	struct list_head work_list;
+	// dwork：干活的，在这里执行回写
 	struct delayed_work dwork;	/* work item used for writeback */
 
 	unsigned long dirty_sleep;	/* last wait */
@@ -166,15 +192,28 @@ struct bdi_writeback {
 	ANDROID_KABI_RESERVE(2);
 };
 
+/*
+表示一个块设备对应的脏页回写相关的信息
+对bdi的操作接口在backing-dev.c中实现：
+bdi_alloc：alloc bdi设备并初始化bdi
+bdi_register：注册，把bdi插入到bdi_tree，bdi_list中
+bdi_put：dec bdi refcnt，为0后release bdi
+bdi_dev_name：获取bdi name
+min_ratio_store: 设置min ratio
+max_ratio_store: 设置max ratio
+*/
 struct backing_dev_info {
 	u64 id;
+	// rb_node、bdi_list用于链接到红黑树和链表中
 	struct rb_node rb_node; /* keyed by ->id */
 	struct list_head bdi_list;
 	unsigned long ra_pages;	/* max readahead in PAGE_SIZE units */
 	unsigned long io_pages;	/* max allowed IO size */
 
 	struct kref refcnt;	/* Reference counter for the structure */
+	// BDI_CAP_WRITEBACK，BDI_CAP_WRITEBACK_ACCT，BDI_CAP_STRICTLIMIT
 	unsigned int capabilities; /* Device capabilities */
+	// 记录min_ratio，max_ratio
 	unsigned int min_ratio;
 	unsigned int max_ratio, max_prop_frac;
 
@@ -182,8 +221,13 @@ struct backing_dev_info {
 	 * Sum of avg_write_bw of wbs with dirty inodes.  > 0 if there are
 	 * any dirty wbs, which is depended upon by bdi_has_dirty().
 	 */
+	// bdi下所有wbs avg_write_bw之和
 	atomic_long_t tot_write_bandwidth;
 
+	/* 
+	 * 在cgroup writeback enable时，存在一个bdi下有多个cgwb情况，这些wbs链接到wb_list
+	 * disable时，bdi和wb是一对一关系；
+	 */
 	struct bdi_writeback wb;  /* the root writeback info for this bdi */
 	struct list_head wb_list; /* list of all wbs */
 #ifdef CONFIG_CGROUP_WRITEBACK
@@ -194,7 +238,7 @@ struct backing_dev_info {
 	wait_queue_head_t wb_waitq;
 
 	struct device *dev;
-	char dev_name[64];
+	char dev_name[64];  //bdi dev名
 	struct device *owner;
 
 	struct timer_list laptop_mode_wb_timer;

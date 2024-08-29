@@ -126,6 +126,11 @@ wbc_blkcg_css(struct writeback_control *wbc)
  * This allows measuring the relative bandwidth of each wb to distribute
  * dirtyable memory accordingly.
  */
+/*
+ * 表示wb所属的的domian, 全局只有一个global_wb_domain，wb都在这个domain中（暂不考虑cgwb）
+ * completions： 所有wb回写的总page数，用来计算周期内某个wb completion占总completions比例，
+ * 进一步计算wb_thresh。 注意这个completions不一定递增的，会随周期指数衰减以保证时效性。
+*/
 struct wb_domain {
 	spinlock_t lock;
 
