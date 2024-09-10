@@ -957,7 +957,7 @@ static void wb_position_ratio(struct dirty_throttle_control *dtc)
 	// 由于fuse处理回写时消耗额外的内存，这些内存不计入nr_dirty，而是NR_WRITEBACK_TEMP
 	// gdtc->dirty = nr_reclaimable + global_node_page_state(NR_WRITEBACK); 不包含NR_WRITEBACK_TEMP
 	// 所以fuse限制更严格，只要dtc->wb_dirty >= wb_thresh 就设置dtc->pos_ratio=0，强制pause
-	// 即便此时总的dirty页在freerun状态。
+	// 即便此时总dirty数在freerun以下。
 	if (unlikely(wb->bdi->capabilities & BDI_CAP_STRICTLIMIT)) {
 		long long wb_pos_ratio;
 
@@ -1044,7 +1044,7 @@ static void wb_position_ratio(struct dirty_throttle_control *dtc)
 	 * threshold, so that the occasional writes won't be blocked and active
 	 * writes can rampup the threshold quickly.
 	 */
-	// 这里指出wb_thresh很可能是0，原因是写入是inactive的，并非很慢！！！
+	// 这里指出wb_thresh很可能是0，原因是写入是inactive的，并非wb本身慢
 	wb_thresh = max(wb_thresh, (limit - dtc->dirty) / 8);
 	/*
 	 * scale global setpoint to wb's:
