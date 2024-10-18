@@ -761,8 +761,10 @@ static void mdtc_calc_avail(struct dirty_throttle_control *mdtc,
 static unsigned long __wb_calc_thresh(struct dirty_throttle_control *dtc)
 {
 	struct wb_domain *dom = dtc_dom(dtc);
+	struct bdi_writeback *wb = dtc->wb;
 	unsigned long thresh = dtc->thresh;
 	u64 wb_thresh;
+	u64 wb_max_thresh;
 	unsigned long numerator, denominator;
 	unsigned long wb_min_ratio, wb_max_ratio;
 
@@ -776,11 +778,21 @@ static unsigned long __wb_calc_thresh(struct dirty_throttle_control *dtc)
 	wb_thresh *= numerator;
 	wb_thresh = div64_ul(wb_thresh, denominator);
 
-	wb_min_max_ratio(dtc->wb, &wb_min_ratio, &wb_max_ratio);
+	wb_min_max_ratio(wb, &wb_min_ratio, &wb_max_ratio);
 
 	wb_thresh += (thresh * wb_min_ratio) / 100;
-	if (wb_thresh > (thresh * wb_max_ratio) / 100)
-		wb_thresh = thresh * wb_max_ratio / 100;
+	wb_max_thresh = thresh * wb_max_ratio / 100;
+	if (wb_thresh > wb_max_thresh)
+		wb_thresh = wb_max_thresh;
+
+	if (unlikely(wb->bdi->capabilities & BDI_CAP_STRICTLIMIT)) {
+		unsigned long limit = hard_dirty_limit(dom, dtc->thresh);
+		u64 wb_scale_thresh = 0;
+
+		if (limit > dtc->dirty)
+			wb_scale_thresh = (limit - dtc->dirty) / 100;
+		wb_thresh = max(wb_thresh, min(wb_scale_thresh, wb_max_thresh / 4));
+	}
 
 	return wb_thresh;
 }
