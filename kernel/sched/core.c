@@ -4174,6 +4174,8 @@ void sched_exec(void)
 		struct migration_arg arg = { p, dest_cpu };
 
 		raw_spin_unlock_irqrestore(&p->pi_lock, flags);
+		// 让某个 CPU 停止当前任务并执行指定的回调函数
+		// 这里执行迁移函数，来把p放在dest_cpu上
 		stop_one_cpu(task_cpu(p), migration_cpu_stop, &arg);
 		return;
 	}

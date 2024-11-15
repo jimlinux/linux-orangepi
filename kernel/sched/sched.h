@@ -636,6 +636,7 @@ static inline int rt_bandwidth_enabled(void)
 
 /* Real-Time classes' related field in a runqueue: */
 struct rt_rq {
+	// 数组根据任务优先级组织，确保高优先级的任务能够优先执行
 	struct rt_prio_array	active;
 	unsigned int		rt_nr_running;
 	unsigned int		rr_nr_running;
@@ -648,17 +649,18 @@ struct rt_rq {
 	} highest_prio;
 #endif
 #ifdef CONFIG_SMP
-	unsigned long		rt_nr_migratory;
+	unsigned long		rt_nr_migratory; //当前系统中正在迁移的实时任务数量
 	unsigned long		rt_nr_total;
 	int			overloaded;
+	//链表，保存可以被推送到其他CPU核心上的实时任务。用于负载均衡和多核处理。
 	struct plist_head	pushable_tasks;
 
 #endif /* CONFIG_SMP */
-	int			rt_queued;
+	int			rt_queued; //表示RT运行队列已经加入rq队列,是判断sched_rt_runnable的依据
 
 	int			rt_throttled;
-	u64			rt_time;
-	u64			rt_runtime;
+	u64			rt_time; // 累加的运行时，超出rt_runtime时，则进行限制
+	u64			rt_runtime; // 分配给rq的运行时
 	/* Nests inside the rq lock: */
 	raw_spinlock_t		rt_runtime_lock;
 

@@ -523,6 +523,7 @@ static inline struct task_group *next_task_group(struct task_group *tg)
 #define for_each_sched_rt_entity(rt_se) \
 	for (; rt_se; rt_se = rt_se->parent)
 
+// se拥有的rq，se一般是cgroup se
 static inline struct rt_rq *group_rt_rq(struct sched_rt_entity *rt_se)
 {
 	return rt_se->my_q;
@@ -1704,10 +1705,12 @@ static struct sched_rt_entity *pick_next_rt_entity(struct rq *rq,
 	struct list_head *queue;
 	int idx;
 
+	// 通过bitmap找优先级最高的位
 	idx = sched_find_first_bit(array->bitmap);
 	BUG_ON(idx >= MAX_RT_PRIO);
 
 	queue = array->queue + idx;
+	// 找链表中第一个项
 	next = list_entry(queue->next, struct sched_rt_entity, run_list);
 
 	return next;
@@ -1790,6 +1793,7 @@ EXPORT_SYMBOL_GPL(pick_highest_pushable_task);
 
 static DEFINE_PER_CPU(cpumask_var_t, local_cpu_mask);
 
+// 选核
 static int find_lowest_rq(struct task_struct *task)
 {
 	struct sched_domain *sd;
@@ -2519,9 +2523,11 @@ static void task_tick_rt(struct rq *rq, struct task_struct *p, int queued)
 	if (p->policy != SCHED_RR)
 		return;
 
+	// FIFO return, FIFO策略：当前task可以一直占用CPU，直到主动放弃或者更高优task抢占；
 	if (--p->rt.time_slice)
 		return;
 
+	// 时间片用完，重新填充
 	p->rt.time_slice = sched_rr_timeslice;
 
 	/*
@@ -2530,7 +2536,7 @@ static void task_tick_rt(struct rq *rq, struct task_struct *p, int queued)
 	 */
 	for_each_sched_rt_entity(rt_se) {
 		if (rt_se->run_list.prev != rt_se->run_list.next) {
-			requeue_task_rt(rq, p, 0);
+			requeue_task_rt(rq, p, 0); // 链表头移到尾
 			resched_curr(rq);
 			return;
 		}
