@@ -232,6 +232,7 @@ static void __update_inv_weight(struct load_weight *lw)
  * Or, weight =< lw.weight (because lw.weight is the runqueue weight), thus
  * weight/lw.weight <= 1, and therefore our shift will also be positive.
  */
+// 主要功能：= delta_exec * weight / lw.weight
 static u64 __calc_delta(u64 delta_exec, unsigned long weight, struct load_weight *lw)
 {
 	u64 fact = scale_load_down(weight);
@@ -544,6 +545,8 @@ static inline int entity_before(struct sched_entity *a,
 	return (s64)(a->vruntime - b->vruntime) < 0;
 }
 
+// 主要功能：更新cfs_rq->min_vruntime
+// = max(cfs_rq->min_vruntime, min(curr->vruntime, leftmost_se->vruntime))
 static void update_min_vruntime(struct cfs_rq *cfs_rq)
 {
 	struct sched_entity *curr = cfs_rq->curr;
@@ -579,6 +582,7 @@ static void update_min_vruntime(struct cfs_rq *cfs_rq)
 /*
  * Enqueue an entity into the rb-tree:
  */
+// 把se加入到rbtree
 static void __enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
 	struct rb_node **link = &cfs_rq->tasks_timeline.rb_root.rb_node;
@@ -610,6 +614,7 @@ static void __enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 			       &cfs_rq->tasks_timeline, leftmost);
 }
 
+// 把se从rbtree删除
 static void __dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
 	trace_android_rvh_dequeue_entity(cfs_rq, se);
@@ -677,6 +682,8 @@ int sched_proc_update_handler(struct ctl_table *table, int write,
 /*
  * delta /= w
  */
+// 主要功能：= delta * NICE_0_LOAD / se->load
+// NICE_0_LOAD == 1024
 static inline u64 calc_delta_fair(u64 delta, struct sched_entity *se)
 {
 	if (unlikely(se->load.weight != NICE_0_LOAD))
@@ -693,11 +700,15 @@ static inline u64 calc_delta_fair(u64 delta, struct sched_entity *se)
  *
  * p = (nr <= nl) ? l : l*nr/nl
  */
+// 主要功能：获取调度周期
 static u64 __sched_period(unsigned long nr_running)
 {
+	// sched_nr_latency默认8
 	if (unlikely(nr_running > sched_nr_latency))
+		// orangepi默认3ms
 		return nr_running * sysctl_sched_min_granularity;
 	else
+		// orangepi默认24ms
 		return sysctl_sched_latency;
 }
 
@@ -707,16 +718,21 @@ static u64 __sched_period(unsigned long nr_running)
  *
  * s = p*P[w/rw]
  */
+// 主要功能：根据se和cfs_rq权重比，计算se应分得的实际CPU时间
 static u64 sched_slice(struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
 	unsigned int nr_running = cfs_rq->nr_running;
 	u64 slice;
 
+	// 走这里
 	if (sched_feat(ALT_PERIOD))
 		nr_running = rq_of(cfs_rq)->cfs.h_nr_running;
 
+	// 获取调度周期
 	slice = __sched_period(nr_running + !se->on_rq);
 
+	// 每个循环考虑的是se权重/se所在cfs_rq权重
+	// 向上遍历到root后，即得出当前se占总slice比例
 	for_each_sched_entity(se) {
 		struct load_weight *load;
 		struct load_weight lw;
@@ -724,12 +740,14 @@ static u64 sched_slice(struct cfs_rq *cfs_rq, struct sched_entity *se)
 		cfs_rq = cfs_rq_of(se);
 		load = &cfs_rq->load;
 
+		// se不在cfs_rq上，则把se权重加到cfs_rq权重上
 		if (unlikely(!se->on_rq)) {
 			lw = cfs_rq->load;
 
 			update_load_add(&lw, se->load.weight);
 			load = &lw;
 		}
+		// slice = slice * se->load.weight / cfs_rq->load
 		slice = __calc_delta(slice, se->load.weight, load);
 	}
 
@@ -744,6 +762,7 @@ static u64 sched_slice(struct cfs_rq *cfs_rq, struct sched_entity *se)
  *
  * vs = s/w
  */
+// 计算1个调度周期内，se分得的vruntime
 static u64 sched_vslice(struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
 	return calc_delta_fair(sched_slice(cfs_rq, se), se);
@@ -860,6 +879,12 @@ static void update_tg_load_avg(struct cfs_rq *cfs_rq)
 /*
  * Update the current task's runtime statistics.
  */
+// 主要功能：
+// 1. 更新curr总运行时间curr->sum_exec_runtime
+// 2. 更新curr vruntime
+// 3. 更新cfs_rq的队列最小vruntime：min_vruntime
+// 4. 更新cgroup cputime统计数据
+// 5. 更新cfs_rq剩余quota，如果用完则resched_curr
 static void update_curr(struct cfs_rq *cfs_rq)
 {
 	struct sched_entity *curr = cfs_rq->curr;
@@ -878,20 +903,25 @@ static void update_curr(struct cfs_rq *cfs_rq)
 	schedstat_set(curr->statistics.exec_max,
 		      max(delta_exec, curr->statistics.exec_max));
 
+	// 1. 更新curr总运行时间curr->sum_exec_runtime
 	curr->sum_exec_runtime += delta_exec;
 	schedstat_add(cfs_rq->exec_clock, delta_exec);
 
+	// 2. 更新curr vruntime
 	curr->vruntime += calc_delta_fair(delta_exec, curr);
+	// 3. 更新cfs_rq的队列最小vruntime：min_vruntime
 	update_min_vruntime(cfs_rq);
 
 	if (entity_is_task(curr)) {
 		struct task_struct *curtask = task_of(curr);
 
 		trace_sched_stat_runtime(curtask, delta_exec, curr->vruntime);
+		// 4. 更新cgroup cputime统计数据
 		cgroup_account_cputime(curtask, delta_exec);
 		account_group_exec_runtime(curtask, delta_exec);
 	}
 
+	// 5. 更新cfs_rq剩余quota，如果用完则resched_curr
 	account_cfs_rq_runtime(cfs_rq, delta_exec);
 }
 
@@ -3103,6 +3133,10 @@ static inline void
 dequeue_load_avg(struct cfs_rq *cfs_rq, struct sched_entity *se) { }
 #endif
 
+// 主要功能：
+// 1. 更新se的权重
+// 2. se权重变化了，需要更新se负载
+// 3. se负载变化了，需要更新se所在cfs_rq的负载
 static void reweight_entity(struct cfs_rq *cfs_rq, struct sched_entity *se,
 			    unsigned long weight)
 {
@@ -3112,18 +3146,21 @@ static void reweight_entity(struct cfs_rq *cfs_rq, struct sched_entity *se,
 			update_curr(cfs_rq);
 		update_load_sub(&cfs_rq->load, se->load.weight);
 	}
+	// 从所属cfs_rq中减去se旧负载
 	dequeue_load_avg(cfs_rq, se);
 
+	// 更新se的权重
 	update_load_set(&se->load, weight);
 
 #ifdef CONFIG_SMP
 	do {
 		u32 divider = get_pelt_divider(&se->avg);
 
+		// 根据se新权重，更新se的负载
 		se->avg.load_avg = div_u64(se_weight(se) * se->avg.load_sum, divider);
 	} while (0);
 #endif
-
+	// 把se更新后的负载，重新加入到cfs_rq
 	enqueue_load_avg(cfs_rq, se);
 	if (se->on_rq)
 		update_load_add(&cfs_rq->load, se->load.weight);
@@ -3216,6 +3253,19 @@ void reweight_task(struct task_struct *p, int prio)
  *
  * hence icky!
  */
+// 主要功能：计算cfs_rq对应group se的权重
+// 计算公式：
+//                     tg->weight * grq->load.weight
+//   ge->load.weight = ----------------------------- 
+//                       \Sum grq->load.weight
+// 解释：
+// tg: task group，即cgroup组，字段se[cpuN] <-> cfs_rq[cpuN]
+// ge: group se == tg->se[N]
+// tg->weight: cgroup的shares节点值
+// grp: == tg->cfs_rq[N] == ge->my_q; grq权重等于下面所有se权重之和
+// Sum grq->load.weight: 即Sum(tg->cfs_rq[cpus].load.weight)
+//
+// 具体实现考虑计算性能做的近似优化；
 static long calc_group_shares(struct cfs_rq *cfs_rq)
 {
 	long tg_weight, tg_shares, load, shares;
@@ -3257,6 +3307,8 @@ static inline int throttled_hierarchy(struct cfs_rq *cfs_rq);
  * Recomputes the group entity based on the current state of its group
  * runqueue.
  */
+// 主要功能：[group se]更新se权重se->load
+// 连锁更新se负载:se->avg.load_avg和cfs_rq负载：cfs_rq->avg.load_avg
 static void update_cfs_group(struct sched_entity *se)
 {
 	struct cfs_rq *gcfs_rq = group_cfs_rq(se);
@@ -3274,9 +3326,10 @@ static void update_cfs_group(struct sched_entity *se)
 	if (likely(se->load.weight == shares))
 		return;
 #else
+	// 计算se的权重
 	shares   = calc_group_shares(gcfs_rq);
 #endif
-
+	// 更新se权重，以及需要连锁更新se负载和cfs_rq负载
 	reweight_entity(cfs_rq_of(se), se, shares);
 }
 
@@ -4169,6 +4222,9 @@ static void check_spread(struct cfs_rq *cfs_rq, struct sched_entity *se)
 #endif
 }
 
+// 主要功能: 确定se放入cfs_rq上se->vruntime的取值
+// 1. 新进程，惩罚
+// 2. 老进程唤醒，奖励
 static void
 place_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int initial)
 {
@@ -4180,10 +4236,12 @@ place_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int initial)
 	 * little, place the new task so that it fits in the slot that
 	 * stays open at the end.
 	 */
+	// 1. 新进程，惩罚; vruntime加一个调度周期，不要抢当前调度周期还没执行完的进程
 	if (initial && sched_feat(START_DEBIT))
 		vruntime += sched_vslice(cfs_rq, se);
 
 	/* sleeps up to a single latency don't count. */
+	// 2. wakeup进程，奖励，尽快执行
 	if (!initial) {
 		unsigned long thresh = sysctl_sched_latency;
 
@@ -4255,20 +4313,32 @@ static inline bool cfs_bandwidth_used(void);
  * this way we don't have the most up-to-date min_vruntime on the originating
  * CPU and an up-to-date min_vruntime on the destination CPU.
  */
-
+// 主要功能: 把调度实体se放入cfs_rq队列, 包括更新运行数据，放入rbtree
 static void
 enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 {
+	// renorm = 非wakeup || 进程迁移
 	bool renorm = !(flags & ENQUEUE_WAKEUP) || (flags & ENQUEUE_MIGRATED);
+	// curr为true的情况，较少但是存在
+	// 例如: root group下有test group，包含A、B两个task，CPU0上只有A，B在CPU1
+	// A阻塞，进入newidle balance 把B迁移过来，stack：
+	// __schedule->pick_next_task_fair-goto idle->newidle_balance->load_balance->activate_task
+	// ->enqueue_task->enqueue_task_fair->enqueue_entity
+	// 在pick_next_task_fair前A_se，test_tg.se[0]已经dequeue,on_rq=0，但是没有put_prev_entity
+	// 在执行enqueue_entity(rq->cfs_rq, test_tg.se[0]) 时，下面判断成立：
 	bool curr = cfs_rq->curr == se;
 
 	/*
 	 * If we're the current task, we must renormalise before calling
 	 * update_curr().
 	 */
+	// 这里逻辑在这可能没用，因为se->on_rq == 0
+	// 先更新se->vruntime并不影响cfs_rq->min_vruntime更新
+	// 相关patch：https://github.com/torvalds/linux/commit/2f950354e6d53
 	if (renorm && curr)
 		se->vruntime += cfs_rq->min_vruntime;
 
+	// 1. 放入之前先更新curr的运行数据和cfs_rq->min_runtime
 	update_curr(cfs_rq);
 
 	/*
@@ -4277,6 +4347,8 @@ enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 	 * placed in the past could significantly boost this task to the
 	 * fairness detriment of existing tasks.
 	 */
+	// 2. 对于非wakeup，如新进程wake_up_new_task或者迁移case，se vruntime归一化
+	// se wakeup或者sleep se->vruntime不需要+/- cfs_rq->min_vruntime
 	if (renorm && !curr)
 		se->vruntime += cfs_rq->min_vruntime;
 
@@ -4288,19 +4360,26 @@ enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 	 *     its group cfs_rq
 	 *   - Add its new weight to cfs_rq->load.weight
 	 */
+	// 3. 更新负载：cfs_rq->avg和se->avg, se要入队，所以有DO_ATTACH
 	update_load_avg(cfs_rq, se, UPDATE_TG | DO_ATTACH);
+	// 4. [group se]更新se->runnable_weight = se->my_q->h_nr_running
 	se_update_runnable(se);
+	// 5. [group se]更新se权重se->load和负载se->avg.load_avg
 	update_cfs_group(se);
+	// 6. cfs_rq的权重增加se权重，cfs_rq->nr_running++
 	account_entity_enqueue(cfs_rq, se);
 
+	// 7. 如果是wakeup case，对se的vruntime做奖励，让它更快运行
 	if (flags & ENQUEUE_WAKEUP)
 		place_entity(cfs_rq, se, 0);
 
 	check_schedstat_required();
 	update_stats_enqueue(cfs_rq, se, flags);
 	check_spread(cfs_rq, se);
+	// 8. se放入cfs_rq的rbtree
 	if (!curr)
 		__enqueue_entity(cfs_rq, se);
+	// 9. 设置se->on_rq， on_rq表示se为runnable状态包括正在执行和等待调度
 	se->on_rq = 1;
 
 	/*
@@ -4362,12 +4441,14 @@ static void clear_buddies(struct cfs_rq *cfs_rq, struct sched_entity *se)
 
 static __always_inline void return_cfs_rq_runtime(struct cfs_rq *cfs_rq);
 
+// 主要功能：更新各种运行数据，把se从rbtree中去除
 static void
 dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 {
 	/*
 	 * Update run-time statistics of the 'current'.
 	 */
+	// 1. 更新curr运行数据，cfs_rq->min_vruntime
 	update_curr(cfs_rq);
 
 	/*
@@ -4378,16 +4459,21 @@ dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 	 *   - For group entity, update its weight to reflect the new share
 	 *     of its group cfs_rq.
 	 */
+	// 2. 更新cfs_rq, se的负载
 	update_load_avg(cfs_rq, se, UPDATE_TG);
+	// 3. se->runnable_weight = se->my_q->h_nr_running;
 	se_update_runnable(se);
-
+	// 4. 更新统计数据
 	update_stats_dequeue(cfs_rq, se, flags);
 
 	clear_buddies(cfs_rq, se);
 
+	// 5. 从rbtree去除
 	if (se != cfs_rq->curr)
 		__dequeue_entity(cfs_rq, se);
+	// 6. 更新se->on_rq, se不在是runnable状态
 	se->on_rq = 0;
+	// 7. cfs_rq权重减去se权重；cfs_rq->nr_running--
 	account_entity_dequeue(cfs_rq, se);
 
 	/*
@@ -4396,12 +4482,14 @@ dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 	 * update_min_vruntime() again, which will discount @se's position and
 	 * can move min_vruntime forward still more.
 	 */
+	// 8. se->vruntime归一化，sleep case不做
 	if (!(flags & DEQUEUE_SLEEP))
 		se->vruntime -= cfs_rq->min_vruntime;
 
 	/* return excess runtime on last dequeue */
+	// 9. 归还剩余bandwidth quota
 	return_cfs_rq_runtime(cfs_rq);
-
+	// 10. 更新se权重se->load
 	update_cfs_group(se);
 
 	/*
@@ -4410,6 +4498,7 @@ dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 	 * put back on, and if we advance min_vruntime, we'll be placed back
 	 * further than we started -- ie. we'll be penalized.
 	 */
+	// 11. 更新cfs_rq->min_vruntime
 	if ((flags & (DEQUEUE_SAVE | DEQUEUE_MOVE)) != DEQUEUE_SAVE)
 		update_min_vruntime(cfs_rq);
 }
@@ -4417,6 +4506,7 @@ dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 /*
  * Preempt the current task with a newly woken task if needed:
  */
+// 主要功能：检查curr运行时间是否超了，是则set resched flag
 static void
 check_preempt_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr)
 {
@@ -4425,12 +4515,15 @@ check_preempt_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr)
 	s64 delta;
 	bool skip_preempt = false;
 
+	// 1. 计算在一个调度周期内分到的实际时间片
 	ideal_runtime = sched_slice(cfs_rq, curr);
+	// 2. 计算从本次被调度选中到现在的运行时间
 	delta_exec = curr->sum_exec_runtime - curr->prev_sum_exec_runtime;
 	trace_android_rvh_check_preempt_tick(current, &ideal_runtime, &skip_preempt,
 			delta_exec, cfs_rq, curr, sysctl_sched_min_granularity);
 	if (skip_preempt)
 		return;
+	// 3. 超了 resched
 	if (delta_exec > ideal_runtime) {
 		resched_curr(rq_of(cfs_rq));
 		/*
@@ -4446,22 +4539,35 @@ check_preempt_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr)
 	 * narrow margin doesn't have to wait for a full slice.
 	 * This also mitigates buddy induced latencies under load.
 	 */
+	// 4. 上面注释的意思是对于唤醒时，check_preempt_wake为否的se，再给一次机会让curr让给它；
+	// 本次运行时间低于最小运行粒度，不要抢占
 	if (delta_exec < sysctl_sched_min_granularity)
 		return;
 
+	// 看leftmost se
 	se = __pick_first_entity(cfs_rq);
 	delta = curr->vruntime - se->vruntime;
 
 	if (delta < 0)
 		return;
 
+	// 当curr vruntime大于left most较多时
+	// 为什么是ideal_runtime 而不是 vruntime
+	// ideal_runtime是带有权重的，权重高则值大，则curr se更不容易被抢占
+	// 引入patch https://github.com/torvalds/linux/commit/f685ceaca
 	if (delta > ideal_runtime)
 		resched_curr(rq_of(cfs_rq));
 }
 
+// 参数：se是马上要投入运行的调度实体，cfs_rq是se所在的cfs rq
+// 主要作用：
+// 1. 把se从rbtree取下
+// 2. 设置cfs_rq->curr = se;
+// 3. 记录开始运行点：se->exec_start，开始运行时se累计运行时间se->prev_sum_exec_runtime
 void set_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
 	/* 'current' is not kept within the tree. */
+	// 1. se要运行了，从rbtree上取下来
 	if (se->on_rq) {
 		/*
 		 * Any task has to be enqueued before it get to execute on
@@ -4472,8 +4578,9 @@ void set_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 		__dequeue_entity(cfs_rq, se);
 		update_load_avg(cfs_rq, se, UPDATE_TG);
 	}
-
+	// 记录开始执行时间点se->exec_start
 	update_stats_curr_start(cfs_rq, se);
+	// 2. se设置到cfs_rq->curr
 	cfs_rq->curr = se;
 
 	/*
@@ -4488,6 +4595,7 @@ void set_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 			    se->sum_exec_runtime - se->prev_sum_exec_runtime));
 	}
 
+	// 3. 记录se开始执行时的sum_exec_runtime
 	se->prev_sum_exec_runtime = se->sum_exec_runtime;
 }
 EXPORT_SYMBOL_GPL(set_next_entity);
@@ -4503,6 +4611,10 @@ wakeup_preempt_entity(struct sched_entity *curr, struct sched_entity *se);
  * 3) pick the "last" process, for cache locality
  * 4) do not run the "skip" process, if something else is available
  */
+// 选出下一个要运行的se，se可能是group se
+// 1. 先看curr，是否vruntime还是比leftmost小
+// 2. 不要选cfs_rq->skip
+// 3. 考虑cfs_rq->next和cfs_rq->last
 static struct sched_entity *
 pick_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *curr)
 {
@@ -4517,6 +4629,8 @@ pick_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *curr)
 	 * If curr is set we have to see if its left of the leftmost entity
 	 * still in the tree, provided there was anything in the tree at all.
 	 */
+	// curr vruntime小于leftmost，还是选curr继续运行
+	// 前提是curr还是runnable的，没有阻塞
 	if (!left || (curr && entity_before(curr, left)))
 		left = curr;
 
@@ -4541,6 +4655,7 @@ pick_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *curr)
 			se = second;
 	}
 
+	// 优先考虑next，last
 	if (cfs_rq->next && wakeup_preempt_entity(cfs_rq->next, left) < 1) {
 		/*
 		 * Someone really wants this to run. If it's not unfair, run it.
@@ -4561,6 +4676,10 @@ done:
 
 static bool check_cfs_rq_runtime(struct cfs_rq *cfs_rq);
 
+// 参数：prev：之前运行的se，cfs_rq: prev所在的cfs_rq
+// 主要作用：设置prev和cfs_rq两个状态
+// 1. prev不是被阻塞仍然是runnable的：放到rbtree上等待下次调度
+// 2. cfs->curr = null
 static void put_prev_entity(struct cfs_rq *cfs_rq, struct sched_entity *prev)
 {
 	/*
@@ -4575,6 +4694,8 @@ static void put_prev_entity(struct cfs_rq *cfs_rq, struct sched_entity *prev)
 
 	check_spread(cfs_rq, prev);
 
+	// 1. prev还是runnable的，说明prev是被抢占的而不是阻塞
+	// 此时不改变prev->on_rq状态，把prev放到cfs_rq rbtree上
 	if (prev->on_rq) {
 		update_stats_wait_start(cfs_rq, prev);
 		/* Put 'current' back into the tree. */
@@ -4582,21 +4703,26 @@ static void put_prev_entity(struct cfs_rq *cfs_rq, struct sched_entity *prev)
 		/* in !on_rq case, update occurred at dequeue */
 		update_load_avg(cfs_rq, prev, 0);
 	}
+	// 2. prev所在的cfs_rq->curr置为null
 	cfs_rq->curr = NULL;
 }
 
+// 主要功能：更新curr se和cfs_rq数据
 static void
 entity_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr, int queued)
 {
 	/*
 	 * Update run-time statistics of the 'current'.
 	 */
+	// 1. 更新运行数据
 	update_curr(cfs_rq);
 
 	/*
 	 * Ensure that runnable average is periodically updated.
 	 */
+	// 2. 更新负载
 	update_load_avg(cfs_rq, curr, UPDATE_TG);
+	// 3. 更新权重
 	update_cfs_group(curr);
 
 #ifdef CONFIG_SCHED_HRTICK
@@ -4616,6 +4742,7 @@ entity_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr, int queued)
 		return;
 #endif
 
+	// 4. 检查是否需要抢占当前se
 	if (cfs_rq->nr_running > 1)
 		check_preempt_tick(cfs_rq, curr);
 }
@@ -5293,7 +5420,7 @@ static void sync_throttle(struct task_group *tg, int cpu)
 }
 
 /* conditionally throttle active cfs_rq's from put_prev_entity() */
-// 检查cfs rq时间是否用完， 如果用完则开始限流
+// 检查cfs rq时间是否用完， 没有用完false；如果用完则开始限流,返回ture
 static bool check_cfs_rq_runtime(struct cfs_rq *cfs_rq)
 {
 	if (!cfs_bandwidth_used())
@@ -5622,6 +5749,7 @@ static int sched_idle_cpu(int cpu)
  * increased. Here we update the fair scheduling stats and
  * then put the task into the rbtree:
  */
+// 主要功能：更新运行数据，把p对应的se放入rbtree
 static void
 enqueue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 {
@@ -5649,7 +5777,10 @@ enqueue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 	if (should_iowait_boost)
 		cpufreq_update_util(rq, SCHED_CPUFREQ_IOWAIT);
 
+	// 1. 从p->se向上直到root group遍历enqueue
+	// 如果p->se所属的cfs_rq只有一个se, 说明p->se的父se也不在上级队列中，需要enqueue
 	for_each_sched_entity(se) {
+		// se已经on_rq，不需要enqueue，break
 		if (se->on_rq)
 			break;
 		cfs_rq = cfs_rq_of(se);
@@ -5666,11 +5797,14 @@ enqueue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 	}
 
 	trace_android_rvh_enqueue_task_fair(rq, p, flags);
+	// 2. 经过step1，enqueue之后，从se向上遍历到root group更新各种数据，如负载、权重
 	for_each_sched_entity(se) {
 		cfs_rq = cfs_rq_of(se);
 
+		// 更新cfs_rq,se负载
 		update_load_avg(cfs_rq, se, UPDATE_TG);
 		se_update_runnable(se);
+		// 更新se权重
 		update_cfs_group(se);
 
 		cfs_rq->h_nr_running++;
@@ -5689,6 +5823,7 @@ enqueue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 	}
 
 	/* At this point se is NULL and we are at root level*/
+	// 增加rq上nr_running：包括正在执行和待调度
 	add_nr_running(rq, 1);
 
 	/*
@@ -5705,6 +5840,7 @@ enqueue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 	 * into account, but that is not straightforward to implement,
 	 * and the following generally works well enough in practice.
 	 */
+	// wakup case: 判断rq是否OVERUTILIZED
 	if (!task_new)
 		update_overutilized_status(rq);
 
@@ -5746,6 +5882,7 @@ static void dequeue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 
 	util_est_dequeue(&rq->cfs, p);
 
+	// 1. 从p->se向root group遍历，如果se所在的cfs_rq只有一个se，那么se的父se也要dequeue
 	for_each_sched_entity(se) {
 		cfs_rq = cfs_rq_of(se);
 		dequeue_entity(cfs_rq, se, flags);
@@ -5758,6 +5895,7 @@ static void dequeue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 			goto dequeue_throttle;
 
 		/* Don't dequeue parent if it has other entities besides us */
+		// p->se dequeue了，如果cfs_rq下还有其他se，那么if成立，break，不需要再向上dequeue
 		if (cfs_rq->load.weight) {
 			/* Avoid re-evaluating load for this entity: */
 			se = parent_entity(se);
@@ -5773,6 +5911,7 @@ static void dequeue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 	}
 
 	trace_android_rvh_dequeue_task_fair(rq, p, flags);
+	// 2. 从se向上更新avg和权重，计数等
 	for_each_sched_entity(se) {
 		cfs_rq = cfs_rq_of(se);
 
@@ -5790,6 +5929,7 @@ static void dequeue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 	}
 
 	/* At this point se is NULL and we are at root level*/
+	// 3. rq上nr_running计数--
 	sub_nr_running(rq, 1);
 
 	/* balance early to pull high priority tasks */
@@ -7231,6 +7371,7 @@ balance_fair(struct rq *rq, struct task_struct *prev, struct rq_flags *rf)
 
 static unsigned long wakeup_gran(struct sched_entity *se)
 {
+	// orangepi默认4ms
 	unsigned long gran = sysctl_sched_wakeup_granularity;
 
 	/*
@@ -7246,6 +7387,7 @@ static unsigned long wakeup_gran(struct sched_entity *se)
 	 * This is especially important for buddies when the leftmost
 	 * task is higher priority than the buddy.
 	 */
+	// 转vruntime
 	return calc_delta_fair(gran, se);
 }
 
@@ -7263,6 +7405,9 @@ static unsigned long wakeup_gran(struct sched_entity *se)
  *  w(c, s3) =  1 // c's - s3's > gran 抢占
  *
  */
+// 功能：判断se是否可抢占curr，是则return 1，否则return0或者-1
+// 判断策略：
+// curr->vruntime - se->vruntime > gran
 static int
 wakeup_preempt_entity(struct sched_entity *curr, struct sched_entity *se)
 {
@@ -7271,6 +7416,7 @@ wakeup_preempt_entity(struct sched_entity *curr, struct sched_entity *se)
 	if (vdiff <= 0)
 		return -1;
 
+	// se权重越高，gran越小
 	gran = wakeup_gran(se);
 	if (vdiff > gran)
 		return 1;
@@ -7311,7 +7457,7 @@ static void set_skip_buddy(struct sched_entity *se)
 /*
  * Preempt the current task with a newly woken task if needed:
  */
-// p是否要抢占cur
+// 主要功能：检查p是否能抢占cur，是则set resched flag
 static void check_preempt_wakeup(struct rq *rq, struct task_struct *p, int wake_flags)
 {
 	struct task_struct *curr = rq->curr;
@@ -7352,6 +7498,7 @@ static void check_preempt_wakeup(struct rq *rq, struct task_struct *p, int wake_
 		return;
 
 	/* Idle tasks are by definition preempted by non-idle tasks. */
+	// 1. 非idle抢占idle
 	if (unlikely(task_has_idle_policy(curr)) &&
 	    likely(!task_has_idle_policy(p)))
 		goto preempt;
@@ -7363,6 +7510,7 @@ static void check_preempt_wakeup(struct rq *rq, struct task_struct *p, int wake_
 	if (unlikely(p->policy != SCHED_NORMAL) || !sched_feat(WAKEUP_PREEMPTION))
 		return;
 
+	// 向上走，直到se和pse在同一个cfs rq
 	find_matching_se(&se, &pse);
 	update_curr(cfs_rq_of(se));
 	trace_android_rvh_check_preempt_wakeup(rq, p, &preempt, &nopreempt,
@@ -7372,19 +7520,21 @@ static void check_preempt_wakeup(struct rq *rq, struct task_struct *p, int wake_
 	if (nopreempt)
 		return;
 	BUG_ON(!pse);
+	// 2. 比较两者vruntime
 	if (wakeup_preempt_entity(se, pse) == 1) {
 		/*
 		 * Bias pick_next to pick the sched entity that is
 		 * triggering this preemption.
 		 */
 		if (!next_buddy_marked)
-			set_next_buddy(pse);
+			set_next_buddy(pse);  //记录被唤醒者wakee
 		goto preempt;
 	}
 
 	return;
 
 preempt:
+	// 3. set resched flag
 	resched_curr(rq);
 	/*
 	 * Only set the backward buddy when the current task is still
@@ -7399,9 +7549,16 @@ preempt:
 		return;
 
 	if (sched_feat(LAST_BUDDY) && scale && entity_is_task(se))
-		set_last_buddy(se);
+		set_last_buddy(se); //记录唤醒者waker
 }
 
+// 主要功能：
+// 1. 在rq->cfs_rq上选出下一个运行的任务p
+// 2. put_prev_entity，更新p->se及其祖先cfs_rq->curr=null
+// 3. set_next_entity, 更新next se及其祖先se所在的cfs_rq->curr=XX_se
+// 4. 如果没有next，进入newidle balance
+// 参数:
+// rq：当前cpu的rq; prev = rq->curr，当前运行的任务
 struct task_struct *
 pick_next_task_fair(struct rq *rq, struct task_struct *prev, struct rq_flags *rf)
 {
@@ -7413,6 +7570,7 @@ pick_next_task_fair(struct rq *rq, struct task_struct *prev, struct rq_flags *rf
 	int throttled = false;
 
 again:
+	// 当前rq上没有任务了
 	if (!sched_fair_runnable(rq))
 		goto idle;
 
@@ -7428,7 +7586,9 @@ again:
 	 * hierarchy, only change the part that actually changes.
 	 */
 
+	// 1. 从根rq->cfs_rq开始，group向下遍历选出下一个运行的task se
 	do {
+		// 1.1 处理curr，这里cfs_rq->curr可能是group se
 		struct sched_entity *curr = cfs_rq->curr;
 
 		/*
@@ -7437,11 +7597,20 @@ again:
 		 * entity, update_curr() will update its vruntime, otherwise
 		 * forget we've ever seen it.
 		 */
+		// 还没有执行put_prev_entity，cfs_rq->curr值还没有更新
+		// case1: curr是task se
+		//			curr被抢占，此时curr非null，curr->on_rq == 1
+		// 		    curr阻塞，此时curr非null，curr->on_rq == 0(pick_next_task之前dequeue了)
+		// case2: curr是group se，是prev的parent
+		//			prev被抢占, 此时curr非null，curr->on_rq == 1
+		//			prev阻塞：
+		//				除prev还有其他se：此时curr非null，curr->on_rq == 1
+		//				只有prev一个se: 此时curr非null，curr->on_rq == 0
 		if (curr) {
 			if (curr->on_rq)
 				update_curr(cfs_rq);
 			else
-				curr = NULL;
+				curr = NULL; // curr已经非runnable状态，置为null
 
 			/*
 			 * This call to check_cfs_rq_runtime() will do the
@@ -7458,8 +7627,9 @@ again:
 				goto simple;
 			}
 		}
-
+		// 1.2 在cfs_rq上选出next se
 		se = pick_next_entity(cfs_rq, curr);
+		// 1.3 向下遍历se，直到se是task se；
 		cfs_rq = group_cfs_rq(se);
 	} while (cfs_rq);
 
@@ -7470,9 +7640,16 @@ again:
 	 * is a different task than we started out with, try and touch the
 	 * least amount of cfs_rqs.
 	 */
+	// 2. pse执行put_prev_entity
+	// se执行set_next_entity
+	// 主要是更新rbtree和cfs_rq->curr
+	// 这里要注意：如果se被选中，则se和它的祖先se都要从rbtree上摘下；
 	if (prev != p) {
 		struct sched_entity *pse = &prev->se;
 
+		// 2.1 若se和pse不属于同一个组，则要更新他们的parent se
+		// pse及其parent se执行put_prev_entity
+		// se及其parent se执行set_next_entity
 		while (!(cfs_rq = is_same_group(se, pse))) {
 			int se_depth = se->depth;
 			int pse_depth = pse->depth;
@@ -7486,7 +7663,7 @@ again:
 				se = parent_entity(se);
 			}
 		}
-
+		// 2.2 更新pse和se及其他们的cfs_rq的状态
 		put_prev_entity(cfs_rq, pse);
 		set_next_entity(cfs_rq, se);
 	}
@@ -7525,6 +7702,7 @@ done: __maybe_unused;
 	if (hrtick_enabled(rq))
 		hrtick_start_fair(rq, p);
 
+	// 判断p的加入是否造成rq过载
 	update_misfit_status(p, rq);
 
 	return p;
@@ -7533,6 +7711,7 @@ idle:
 	if (!rf)
 		return NULL;
 
+	// 没有其他task可运行，去给其他cpu帮忙
 	new_tasks = newidle_balance(rq, rf);
 
 	/*
@@ -11214,11 +11393,13 @@ static void rq_offline_fair(struct rq *rq)
  * and everything must be accessed through the @rq and @curr passed in
  * parameters.
  */
+// 主要功能：更新curr se数据，curr se包括task se和它的祖先group se
 static void task_tick_fair(struct rq *rq, struct task_struct *curr, int queued)
 {
 	struct cfs_rq *cfs_rq;
 	struct sched_entity *se = &curr->se;
 
+	// 1. 从curr se向上遍历更新se和它祖先se的数据
 	for_each_sched_entity(se) {
 		cfs_rq = cfs_rq_of(se);
 		entity_tick(cfs_rq, se, queued);
@@ -11227,7 +11408,9 @@ static void task_tick_fair(struct rq *rq, struct task_struct *curr, int queued)
 	if (static_branch_unlikely(&sched_numa_balancing))
 		task_tick_numa(rq, curr);
 
+	// rq上是否有算力不匹配的task
 	update_misfit_status(curr, rq);
+	// rq是否利用率过高
 	update_overutilized_status(task_rq(curr));
 }
 

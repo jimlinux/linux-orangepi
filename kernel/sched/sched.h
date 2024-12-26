@@ -549,9 +549,10 @@ struct cfs_rq {
 	 * 'curr' points to currently running entity on this cfs_rq.
 	 * It is set to NULL otherwise (i.e when none are currently running).
 	 */
-	struct sched_entity	*curr;
-	struct sched_entity	*next;
-	struct sched_entity	*last;
+	// 注意：这里几个变量，可以是group se
+	struct sched_entity	*curr; // 当前执行的se
+	struct sched_entity	*next; // 上次被唤醒的se, 在check_preempt_wakeup中设置
+	struct sched_entity	*last; // 上次唤醒别人的se
 	struct sched_entity	*skip;
 
 #ifdef	CONFIG_SCHED_DEBUG
@@ -738,6 +739,8 @@ struct dl_rq {
 /* An entity is a task if it doesn't "own" a runqueue */
 #define entity_is_task(se)	(!se->my_q)
 
+// [group se]更新se->runnable_weight = se->my_q->h_nr_running
+// se->runnable_weight用于计算se->avg->runnable_avg
 static inline void se_update_runnable(struct sched_entity *se)
 {
 	if (!entity_is_task(se))
@@ -929,6 +932,7 @@ struct rq {
 	 * nr_running and cpu_load should be in the same cacheline because
 	 * remote CPUs use both these fields when doing load calculation.
 	 */
+	// 包括正在执行和待调度的se
 	unsigned int		nr_running;
 #ifdef CONFIG_NUMA_BALANCING
 	unsigned int		nr_numa_running;

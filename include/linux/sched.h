@@ -460,10 +460,10 @@ struct sched_statistics {
 
 struct sched_entity {
 	/* For load-balancing: */
-	struct load_weight		load;
-	struct rb_node			run_node;
+	struct load_weight		load; // 权重
+	struct rb_node			run_node; // 挂在rbtree
 	struct list_head		group_node;
-	unsigned int			on_rq;
+	unsigned int			on_rq; // se为runnable，包括正在运行和等待调度状态
 
 	u64				exec_start;
 	u64				sum_exec_runtime;
@@ -475,12 +475,12 @@ struct sched_entity {
 	struct sched_statistics		statistics;
 
 #ifdef CONFIG_FAIR_GROUP_SCHED
-	int				depth;
+	int				depth; // group深度,root group为0，向下越深
 	struct sched_entity		*parent;
 	/* rq on which this entity is (to be) queued: */
-	struct cfs_rq			*cfs_rq;
+	struct cfs_rq			*cfs_rq; // se所属的cfs rq
 	/* rq "owned" by this entity/group: */
-	struct cfs_rq			*my_q;
+	struct cfs_rq			*my_q; // se拥有的cfs rq，task se值为null
 	/* cached value of my_q->h_nr_running */
 	unsigned long			runnable_weight;
 #endif
@@ -492,7 +492,7 @@ struct sched_entity {
 	 * Put into separate cache line so it does not
 	 * collide with read-mostly values above.
 	 */
-	struct sched_avg		avg;
+	struct sched_avg		avg; // 负载
 #endif
 
 	ANDROID_KABI_RESERVE(1);
