@@ -177,6 +177,12 @@ static u32 __accumulate_pelt_segments(u64 periods, u32 d1, u32 d3)
  *      d1 y^p + 1024 \Sum y^n + d3 y^0		(Step 2)
  *                     n=1
  */
+// 主要功能：计算se或者cfs_rq的3个负载sum
+// 参数：delta = d1 + d2 + d3
+// 		load: se传入!!se->on_rq, cfs_rq传入权重cfs_rq->load.weight
+//		runnable: se传入se_runnable(se)，cfs_rq传入cfs_rq->h_nr_running
+//		running: se传入cfs_rq->curr == se, cfs_rq传入cfs_rq->curr != NULL
+// 		返回值：periods
 static __always_inline u32
 accumulate_sum(u64 delta, struct sched_avg *sa,
 	       unsigned long load, unsigned long runnable, int running)
@@ -184,12 +190,14 @@ accumulate_sum(u64 delta, struct sched_avg *sa,
 	u32 contrib = (u32)delta; /* p == 0 -> delta < 1024 */
 	u64 periods;
 
+	// 1. delta加上次的d3，用来凑满一个周期做下面的整除，实际并不计入负载
 	delta += sa->period_contrib;
 	periods = delta / 1024; /* A period is 1024us (~1ms) */
 
 	/*
 	 * Step 1: decay old *_sum if we crossed period boundaries.
 	 */
+	// 1. delta大于1个周期（1024us），计算old_load * y^periods， 对3种old load衰减
 	if (periods) {
 		sa->load_sum = decay_load(sa->load_sum, periods);
 		sa->runnable_sum =
@@ -211,12 +219,20 @@ accumulate_sum(u64 delta, struct sched_avg *sa,
 			 * the below usage of @contrib to dissapear entirely,
 			 * so no point in calculating it.
 			 */
+			// 2. 计算contrib = d1 + d2 + d3
+			// d1 = (1024 - sa->period_contrib) * y^p  其中p = periods
+            // d2 = 1024 * sum(y^n, n=1...p-1) = 1024 * (sum(y^n, n=0...inf) - sum(y^n, n=p...inf) - 1)
+            //         = LOAD_AVG_MAX - decay_load(LOAD_AVG_MAX, periods) - 1024;
+            // d3 = delta;
 			contrib = __accumulate_pelt_segments(periods,
 					1024 - sa->period_contrib, delta);
 		}
 	}
+
+	// 记录d3，给下次凑满1个周期用
 	sa->period_contrib = delta;
 
+	// 3. 根据参数，加上负载贡献contrib
 	if (load)
 		sa->load_sum += load * contrib;
 	if (runnable)
@@ -255,6 +271,12 @@ accumulate_sum(u64 delta, struct sched_avg *sa,
  *   load_avg = u_0` + y*(u_0 + u_1*y + u_2*y^2 + ... )
  *            = u_0 + u_1*y + u_2*y^2 + ... [re-labeling u_i --> u_{i+1}]
  */
+// 主要功能：计算se或者cfs_rq的3个负载sum
+// 参数：
+// 		load: se传入!!se->on_rq, cfs_rq传入权重cfs_rq->load.weight
+//		runnable: se传入se_runnable(se)，cfs_rq传入cfs_rq->h_nr_running
+//		running: se传入cfs_rq->curr == se, cfs_rq传入cfs_rq->curr != NULL
+// 		返回值：now是否进入了新周期
 static __always_inline int
 ___update_load_sum(u64 now, struct sched_avg *sa,
 		  unsigned long load, unsigned long runnable, int running)
@@ -302,6 +324,7 @@ ___update_load_sum(u64 now, struct sched_avg *sa,
 	 * Step 1: accumulate *_sum since last_update_time. If we haven't
 	 * crossed period boundaries, finish.
 	 */
+	// 实际处理函数
 	if (!accumulate_sum(delta, sa, load, runnable, running))
 		return 0;
 
@@ -332,9 +355,15 @@ ___update_load_sum(u64 now, struct sched_avg *sa,
  * the period_contrib of cfs_rq when updating the sched_avg of a sched_entity
  * if it's more convenient.
  */
+// 主要作用：根据sum/divider求se或者cfs_rq的avg
+// 参数：load: se是权重se_weight(se)，cfs_rq是1
 static __always_inline void
 ___update_load_avg(struct sched_avg *sa, unsigned long load)
 {
+	// 获得PELT序列的最大值
+	// 计算方法：
+	// LOAD_AVG_MAX = 1024 * sum(y^n, n=0...inf)
+	// divider  = LOAD_AVG_MAX*y + sa->period_contrib = LOAD_AVG_MAX - 1024 + sa->period_contrib
 	u32 divider = get_pelt_divider(sa);
 
 	/*
@@ -370,7 +399,7 @@ ___update_load_avg(struct sched_avg *sa, unsigned long load)
  *   load_sum = \Sum se_weight(se) * se->avg.load_sum
  *   load_avg = \Sum se->avg.load_avg
  */
-
+// 主要作用：更新block se负载，仅对old avg做衰减
 int __update_load_avg_blocked_se(u64 now, struct sched_entity *se)
 {
 	if (___update_load_sum(now, &se->avg, 0, 0, 0)) {
@@ -383,6 +412,7 @@ int __update_load_avg_blocked_se(u64 now, struct sched_entity *se)
 }
 EXPORT_SYMBOL_GPL(__update_load_avg_blocked_se);
 
+// 主要作用：更新se负载
 int __update_load_avg_se(u64 now, struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
 	if (___update_load_sum(now, &se->avg, !!se->on_rq, se_runnable(se),
@@ -397,6 +427,10 @@ int __update_load_avg_se(u64 now, struct cfs_rq *cfs_rq, struct sched_entity *se
 	return 0;
 }
 
+// 更新cfs负载
+// cfs_rq负载等于其下所有se负载之和，但是计算没有用求和方式
+// runnable_avg = \Sum se->avg.runnable_avg
+// load_avg = \Sum se->avg.load_avg
 int __update_load_avg_cfs_rq(u64 now, struct cfs_rq *cfs_rq)
 {
 	if (___update_load_sum(now, &cfs_rq->avg,

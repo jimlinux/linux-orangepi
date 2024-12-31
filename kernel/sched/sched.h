@@ -781,9 +781,11 @@ static inline bool sched_asym_prefer(int a, int b)
 	return arch_asym_cpu_priority(a) > arch_asym_cpu_priority(b);
 }
 
+// 性能域，通过 build_perf_domains 创建，每个性能域包含一组频率变化相同的CPUs
+// 所有性能域通过next链接, 例如orangepi有3个性能域：pd3[6,7]->pd2[4,5]->pd1[0,1,2,3]
 struct perf_domain {
-	struct em_perf_domain *em_pd;
-	struct perf_domain *next;
+	struct em_perf_domain *em_pd; // 性能域具体实现
+	struct perf_domain *next; // next pd
 	struct rcu_head rcu;
 };
 
@@ -851,6 +853,7 @@ struct root_domain {
 	 * NULL-terminated list of performance domains intersecting with the
 	 * CPUs of the rd. Protected by RCU.
 	 */
+	// percpu rq->rd下都有一个pd，性能域
 	struct perf_domain __rcu *pd;
 
 	ANDROID_VENDOR_DATA_ARRAY(1, 4);

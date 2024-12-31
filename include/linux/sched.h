@@ -411,10 +411,19 @@ struct util_est {
  * issues.
  */
 struct sched_avg {
+	// 记录该结构最后一次更新的时间，这里是归一化时间，不是物理时间
 	u64				last_update_time;
+	// 总负载，综合了runnable（正在运行+等待调度） + blocked load
+	// (block的task avg.load_sum没有在cfs_rq avg.load_sum中减去)
+	// 同时load_sum统计时考虑了se/cfs_rq的权重；runnable_sum和util_sum不考虑权重
 	u64				load_sum;
+	// 统计runable时间（正在运行+等待调度），计算方式类似于util_sum
+	// 主要用于度量cfs_rq上runnable任务们的压力;
+	// 对于task se来说，意义不大，runnable_sum==util_sum
 	u64				runnable_sum;
+	// 统计任务在CPU上running（正在运行）时间， 度量se或者rq的CPU使用率
 	u32				util_sum;
+	// 上次更新负载，没有凑足一个周期（1024us）的剩余时间（即上一次delta中的d3）
 	u32				period_contrib;
 	unsigned long			load_avg;
 	unsigned long			runnable_avg;

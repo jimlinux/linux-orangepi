@@ -206,6 +206,7 @@ static unsigned int get_next_freq(struct sugov_policy *sg_policy,
  * based on the task model parameters and gives the minimal utilization
  * required to meet deadlines.
  */
+// 计算cpu_util_{cfs,rt,dl,irq}()综合util，不超过最大值max
 unsigned long schedutil_cpu_util(int cpu, unsigned long util_cfs,
 				 unsigned long max, enum schedutil_type type,
 				 struct task_struct *p)
@@ -223,6 +224,7 @@ unsigned long schedutil_cpu_util(int cpu, unsigned long util_cfs,
 	 * because of inaccuracies in how we track these -- see
 	 * update_irq_load_avg().
 	 */
+	// irq使用率
 	irq = cpu_util_irq(rq);
 	if (unlikely(irq >= max))
 		return max;
@@ -241,6 +243,7 @@ unsigned long schedutil_cpu_util(int cpu, unsigned long util_cfs,
 	 */
 	util = util_cfs + cpu_util_rt(rq);
 	if (type == FREQUENCY_UTIL)
+		// clamp @util with @rq and @p effective uclamp values
 		util = uclamp_rq_util_with(rq, util, p);
 
 	dl_util = cpu_util_dl(rq);

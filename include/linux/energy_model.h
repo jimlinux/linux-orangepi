@@ -19,10 +19,11 @@
  * @cost:	The cost coefficient associated with this level, used during
  *		energy calculation. Equal to: power * max_frequency / frequency
  */
+// pd域中表示某个性能状态，主要存储 pd中某个频率大小和对应的功耗
 struct em_perf_state {
-	unsigned long frequency;
-	unsigned long power;
-	unsigned long cost;
+	unsigned long frequency; // 频率
+	unsigned long power; // 对应上面频率的功率，单位mw
+	unsigned long cost; // 用于计算功耗，= power * max_frequency / frequency
 };
 
 /**
@@ -42,11 +43,12 @@ struct em_perf_state {
  * a 1-to-1 mapping with CPUFreq policies. In case of other devices the @cpus
  * field is unused.
  */
+// perf domain：性能域，包含一组频率变化一致的CPUs
 struct em_perf_domain {
-	struct em_perf_state *table;
-	int nr_perf_states;
-	int milliwatts;
-	unsigned long cpus[];
+	struct em_perf_state *table; // 记录perf state，包含频率、能耗等
+	int nr_perf_states; // 效率状态个数
+	int milliwatts; // 毫瓦
+	unsigned long cpus[]; // 包含的CPUs
 };
 
 #define em_span_cpus(em) (to_cpumask((em)->cpus))
@@ -116,6 +118,10 @@ void em_dev_unregister_perf_domain(struct device *dev);
  * Return: the sum of the energy consumed by the CPUs of the domain assuming
  * a capacity state satisfying the max utilization of the domain.
  */
+// 主要功能：计算pd域所有CPUs功耗
+// 参数：
+// @max_util: pd域中CPUs中的最高利用率 - 决定目标频率
+// @sum_util: pd域中所有CPUs的总利用率 - 决定总功耗
 static inline unsigned long em_cpu_energy(struct em_perf_domain *pd,
 				unsigned long max_util, unsigned long sum_util)
 {
@@ -134,12 +140,14 @@ static inline unsigned long em_cpu_energy(struct em_perf_domain *pd,
 	cpu = cpumask_first(to_cpumask(pd->cpus));
 	scale_cpu = arch_scale_cpu_capacity(cpu);
 	ps = &pd->table[pd->nr_perf_states - 1];
+	// 目标频率 = ps最大频率 * (最大利用率 / cpu总算力)
 	freq = map_util_freq(max_util, ps->frequency, scale_cpu);
 
 	/*
 	 * Find the lowest performance state of the Energy Model above the
 	 * requested frequency.
 	 */
+	// 找到匹配目标频率的ps
 	for (i = 0; i < pd->nr_perf_states; i++) {
 		ps = &pd->table[i];
 		if (ps->frequency >= freq)
@@ -150,6 +158,8 @@ static inline unsigned long em_cpu_energy(struct em_perf_domain *pd,
 	 * The capacity of a CPU in the domain at the performance state (ps)
 	 * can be computed as:
 	 *
+	 * 此ps下CPU的算力 = cpu的总算力scale_cpu * (ps->freq / cpu_max_freq)
+	 * 
 	 *             ps->freq * scale_cpu
 	 *   ps->cap = --------------------                          (1)
 	 *                 cpu_max_freq
@@ -157,6 +167,8 @@ static inline unsigned long em_cpu_energy(struct em_perf_domain *pd,
 	 * So, ignoring the costs of idle states (which are not available in
 	 * the EM), the energy consumed by this CPU at that performance state
 	 * is estimated as:
+	 * 
+	 * 当cpu以某个频率运行时，消耗的能量还与当前cpu算力使用率(cpu_util/ps->cap)成正比
 	 *
 	 *             ps->power * cpu_util
 	 *   cpu_nrg = --------------------                          (2)
@@ -184,6 +196,8 @@ static inline unsigned long em_cpu_energy(struct em_perf_domain *pd,
 	 * total energy of the domain (which is the simple sum of the energy of
 	 * all of its CPUs) can be factorized as:
 	 *
+	 * 计算pd域中所有CPUs的功耗
+	 * 
 	 *            ps->cost * \Sum cpu_util
 	 *   pd_nrg = ------------------------                       (4)
 	 *                  scale_cpu

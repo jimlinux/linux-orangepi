@@ -265,6 +265,8 @@ static struct perf_domain *find_pd(struct perf_domain *pd, int cpu)
 
 static struct perf_domain *pd_init(int cpu)
 {
+	// 在这里获取：
+	// https://elixir.bootlin.com/linux/v5.10.160/source/kernel/power/energy_model.c#L228
 	struct em_perf_domain *obj = em_cpu_get(cpu);
 	struct perf_domain *pd;
 
@@ -384,10 +386,12 @@ static bool build_perf_domains(const struct cpumask *cpu_map)
 			continue;
 
 		/* Create the new pd and add it to the local list. */
+		// 在链表头插入
 		tmp = pd_init(i);
 		if (!tmp)
 			goto free;
 		tmp->next = pd;
+		// pd指向链表头
 		pd = tmp;
 
 		/*
