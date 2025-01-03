@@ -91,7 +91,10 @@ struct rq;
 struct cpuidle_state;
 
 /* task_struct::on_rq states: */
+// 0: 阻塞
+// 表示任务已放入运行队列，runnable状态，包括正在执行和等待调度
 #define TASK_ON_RQ_QUEUED	1
+// 任务正做cpu间迁移：migrate_tasks|__migrate_swap_task|move_queued_task
 #define TASK_ON_RQ_MIGRATING	2
 
 extern __read_mostly int scheduler_running;
@@ -567,6 +570,9 @@ struct cfs_rq {
 #ifndef CONFIG_64BIT
 	u64			load_last_update_time_copy;
 #endif
+	// 当一个任务退出或者唤醒后迁移到到其他cpu上的时候，
+	// 那么原本所在CPU的cfs rq上需要移除该任务带来的负载;
+	// 由于持rq锁问题，所以先把移除的负载记录在这个成员中，适当的时机再更新之。
 	struct {
 		raw_spinlock_t	lock ____cacheline_aligned;
 		int		nr;
@@ -586,6 +592,7 @@ struct cfs_rq {
 	 * Where f(tg) is the recursive weight fraction assigned to
 	 * this group.
 	 */
+	// cfs_rq相对于顶层rq->cfs_rq的负载cfs_rq->h_load
 	unsigned long		h_load;
 	u64			last_h_load_update;
 	struct sched_entity	*h_load_next;
@@ -989,6 +996,7 @@ struct rq {
 	struct task_struct __rcu	*curr;
 	struct task_struct	*idle;
 	struct task_struct	*stop;
+	// 下次load balance的时间戳
 	unsigned long		next_balance;
 	struct mm_struct	*prev_mm;
 
@@ -1009,7 +1017,10 @@ struct rq {
 	struct root_domain		*rd;
 	struct sched_domain __rcu	*sd;
 
+	// 可以用于CFS任务的算力，去掉了执行rt、dl、irq的算力以及温控损失的算力
+	// update_cpu_capacity中更新
 	unsigned long		cpu_capacity;
+	// 该CPU的原始算力，最大核的最高频为1024，其他核归一化
 	unsigned long		cpu_capacity_orig;
 
 	struct callback_head	*balance_callback;
@@ -1526,16 +1537,23 @@ DECLARE_PER_CPU(struct sched_domain __rcu *, sd_asym_packing);
 DECLARE_PER_CPU(struct sched_domain __rcu *, sd_asym_cpucapacity);
 extern struct static_key_false sched_asym_cpucapacity;
 
+// 用来描述sched group的算力信息
 struct sched_group_capacity {
+	// 有可能多个sched group会共享sched_group_capacity，因此需要一个引用计数
 	atomic_t		ref;
 	/*
 	 * CPU capacity of this group, SCHED_CAPACITY_SCALE being max capacity
 	 * for a single CPU.
 	 */
+	// 该group中可以用于cfs任务的总算力（各个CPU算力之和）
 	unsigned long		capacity;
+	// 该sched group中最小的可用于cfs任务的capacity（对单个CPU而言）
 	unsigned long		min_capacity;		/* Min per-CPU capacity in group */
+	// 该sched group中最大的可用于cfs任务的capacity（对单个CPU而言）
 	unsigned long		max_capacity;		/* Max per-CPU capacity in group */
+	// 下一次更新算力的时间点
 	unsigned long		next_update;
+	// 该group中是否有由于affinity原因产生的不均衡问题
 	int			imbalance;		/* XXX unrelated to capacity but shared group state */
 
 #ifdef CONFIG_SCHED_DEBUG
@@ -1546,10 +1564,14 @@ struct sched_group_capacity {
 };
 
 struct sched_group {
+	// sched domain中的所有sched group会形成环形链表，next指向groups链表中的下一个节点
 	struct sched_group	*next;			/* Must be a circular list */
+	// 该sched group的引用计数
 	atomic_t		ref;
 
+	// 该调度组中有多少个cpu
 	unsigned int		group_weight; // group中包含几个cpu
+	// 该调度组的算力信息
 	struct sched_group_capacity *sgc;
 	int			asym_prefer_cpu;	/* CPU of highest priority in group */
 
@@ -1560,6 +1582,7 @@ struct sched_group {
 	 * by attaching extra space to the end of the structure,
 	 * depending on how many CPUs the kernel has booted up with)
 	 */
+	// 该调度组包括哪些CPU
 	unsigned long		cpumask[];
 };
 

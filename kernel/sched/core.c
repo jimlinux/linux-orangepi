@@ -1662,6 +1662,9 @@ static inline void uclamp_post_fork(struct task_struct *p) { }
 static inline void init_uclamp(void) { }
 #endif /* CONFIG_UCLAMP_TASK */
 
+// 主要作用： 把p放入运行队列
+// 调用者：activate_task | do_set_cpus_allowed | set_user_nice | __sched_setscheduler
+//			| sched_setnuma | sched_move_task
 static inline void enqueue_task(struct rq *rq, struct task_struct *p, int flags)
 {
 	if (!(flags & ENQUEUE_NOCLOCK))
@@ -1678,6 +1681,9 @@ static inline void enqueue_task(struct rq *rq, struct task_struct *p, int flags)
 	trace_android_rvh_after_enqueue_task(rq, p);
 }
 
+// 主要作用： 把p移出运行队列
+// 调用者：deactivate_task | do_set_cpus_allowed | set_user_nice
+//			| __sched_setscheduler | sched_setnuma | sched_move_task
 static inline void dequeue_task(struct rq *rq, struct task_struct *p, int flags)
 {
 	if (!(flags & DEQUEUE_NOCLOCK))
@@ -1694,6 +1700,9 @@ static inline void dequeue_task(struct rq *rq, struct task_struct *p, int flags)
 	trace_android_rvh_after_dequeue_task(rq, p);
 }
 
+// 主要作用：把p放入运行队列, 设置p->on_rq为TASK_ON_RQ_QUEUED
+// 调用者：migrate_tasks | wake_up_new_task | ttwu_do_activate
+//			| __migrate_swap_task | move_queued_task
 void activate_task(struct rq *rq, struct task_struct *p, int flags)
 {
 	enqueue_task(rq, p, flags);
@@ -1702,6 +1711,8 @@ void activate_task(struct rq *rq, struct task_struct *p, int flags)
 }
 EXPORT_SYMBOL_GPL(activate_task);
 
+// 主要作用：设置p->on_rq：阻塞时为0，迁移时为TASK_ON_RQ_MIGRATING；把p移出运行队列
+// 调用者：__schedule|migrate_tasks|__migrate_swap_task|move_queued_task
 void deactivate_task(struct rq *rq, struct task_struct *p, int flags)
 {
 	p->on_rq = (flags & DEQUEUE_SLEEP) ? 0 : TASK_ON_RQ_MIGRATING;
@@ -1842,6 +1853,8 @@ static inline bool is_cpu_allowed(struct task_struct *p, int cpu)
  *
  * Returns (locked) new rq. Old rq's lock is released.
  */
+// 把一个runnable状态的p，从old rq移动到new rq
+// 调用者：__set_cpus_allowed_ptr_locked | __migrate_task
 static struct rq *move_queued_task(struct rq *rq, struct rq_flags *rf,
 				   struct task_struct *p, int new_cpu)
 {
@@ -1858,6 +1871,7 @@ static struct rq *move_queued_task(struct rq *rq, struct rq_flags *rf,
 	if (detached)
 		goto attach;
 
+	//把p从old rq上移除
 	deactivate_task(rq, p, DEQUEUE_NOCLOCK);
 	set_task_cpu(p, new_cpu);
 
@@ -1867,7 +1881,9 @@ attach:
 
 	rq_lock(rq, rf);
 	BUG_ON(task_cpu(p) != new_cpu);
+	// 把p放在new rq上
 	activate_task(rq, p, 0);
+	// check是否抢占curr
 	check_preempt_curr(rq, p, 0);
 
 	return rq;
@@ -1887,6 +1903,8 @@ struct migration_arg {
  * So we race with normal scheduler movements, but that's OK, as long
  * as the task is no longer on this CPU.
  */
+// 主要作用：把p迁移到dest_cpu
+// 调用者：migrate_tasks | migration_cpu_stop
 static struct rq *__migrate_task(struct rq *rq, struct rq_flags *rf,
 				 struct task_struct *p, int dest_cpu)
 {
@@ -1905,6 +1923,8 @@ static struct rq *__migrate_task(struct rq *rq, struct rq_flags *rf,
  * and performs thread migration by bumping thread off CPU then
  * 'pushing' onto another runqueue.
  */
+// 主要作用：在stopper进程中执行；用来迁移正在执行的task；
+// 调用者：__set_cpus_allowed_ptr_locked | sched_exec
 static int migration_cpu_stop(void *data)
 {
 	struct migration_arg *arg = data;
@@ -2161,6 +2181,16 @@ out_free_mask:
 	free_cpumask_var(new_mask);
 }
 
+// 主要作用：
+// task发生cpu切换时，dequeue后，enqueue前
+// 1. 更新p所在old rq的状态，如cfs_rq的负载减去p负载
+// 2. 更新p状态，如vruntime-=old_cfs_rq->vruntime，wake_cpu=new_cpu，p->se.cfs_rq等
+// 调用者：
+// 	1. wakup选核：try_to_wake_up|sched_ttwu_pending
+//	2. cfs load balance相关：load_balance -> detach_tasks -> detach_task
+//	3. shed_exec选核，设置亲和性等导致的迁移：move_queued_task
+//	4. numa: __migrate_swap_task
+// 调用顺序: dequeue_task -> set_task_cpu -> enqueue_task
 void set_task_cpu(struct task_struct *p, unsigned int new_cpu)
 {
 #ifdef CONFIG_SCHED_DEBUG
@@ -2215,6 +2245,7 @@ void set_task_cpu(struct task_struct *p, unsigned int new_cpu)
 }
 EXPORT_SYMBOL_GPL(set_task_cpu);
 
+// 主要作用：调用者为numa调度相关
 static void __migrate_swap_task(struct task_struct *p, int cpu)
 {
 	if (task_on_rq_queued(p)) {
@@ -2294,6 +2325,7 @@ unlock:
 /*
  * Cross migrate two tasks
  */
+// 调用者：task_numa_migrate，用来做numa相关的调度
 int migrate_swap(struct task_struct *cur, struct task_struct *p,
 		int target_cpu, int curr_cpu)
 {
@@ -3221,7 +3253,7 @@ try_to_wake_up(struct task_struct *p, unsigned int state, int wake_flags)
 #else
 	cpu = task_cpu(p);
 #endif /* CONFIG_SMP */
-
+	// 加入cpu的运行队列
 	ttwu_queue(p, cpu, wake_flags);
 unlock:
 	raw_spin_unlock_irqrestore(&p->pi_lock, flags);
@@ -7023,6 +7055,7 @@ static struct task_struct *__pick_migrate_task(struct rq *rq)
  *
  * force: if false, the function will skip CPU pinned kthreads.
  */
+// 主要作用：cpu支持热拔插，cpu unplug时，把所有任务做迁移
 static void migrate_tasks(struct rq *dead_rq, struct rq_flags *rf, bool force)
 {
 	struct rq *rq = dead_rq;

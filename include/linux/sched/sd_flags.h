@@ -48,7 +48,12 @@
  * SHARED_CHILD: Set from the base domain up to cpuset.sched_relax_domain_level.
  * NEEDS_GROUPS: Load balancing flag.
  */
+// 标记domain是否支持newidle balance
 SD_FLAG(SD_BALANCE_NEWIDLE, SDF_SHARED_CHILD | SDF_NEEDS_GROUPS)
+
+
+// 在exec、fork、wake的时候，该domain是否支持指定类型的负载均衡。
+// 这些标记符号主要用来在确定exec、fork和wakeup场景下选核的范围。
 
 /*
  * Balance on exec
@@ -79,6 +84,7 @@ SD_FLAG(SD_BALANCE_WAKE, SDF_SHARED_CHILD | SDF_NEEDS_GROUPS)
  *
  * SHARED_CHILD: Set from the base domain up to the NUMA reclaim level.
  */
+// 是否在该domain上考虑进行wake affine，即满足一定条件下，让waker和wakee尽量靠近
 SD_FLAG(SD_WAKE_AFFINE, SDF_SHARED_CHILD)
 
 /*
@@ -88,6 +94,8 @@ SD_FLAG(SD_WAKE_AFFINE, SDF_SHARED_CHILD)
  *                asymmetry is detected.
  * NEEDS_GROUPS: Per-CPU capacity is asymmetric between groups.
  */
+// 该domain上的CPU上是否具有一样的capacity？
+// MC domain上的CPU算力一样，但是DIE domain上会设置该flag
 SD_FLAG(SD_ASYM_CPUCAPACITY, SDF_SHARED_PARENT | SDF_NEEDS_GROUPS)
 
 /*
@@ -97,6 +105,9 @@ SD_FLAG(SD_ASYM_CPUCAPACITY, SDF_SHARED_PARENT | SDF_NEEDS_GROUPS)
  *               CPU capacity.
  * NEEDS_GROUPS: Capacity is shared between groups.
  */
+// 该domain上的CPU上是否共享计算单元？
+// 例如SMT下，两个硬件线程被看做两个CPU core，但是它们之间不是完全独立的，会竞争一些硬件的计算单元。
+// 手机上未使用该flag
 SD_FLAG(SD_SHARE_CPUCAPACITY, SDF_SHARED_CHILD | SDF_NEEDS_GROUPS)
 
 /*
@@ -106,6 +117,7 @@ SD_FLAG(SD_SHARE_CPUCAPACITY, SDF_SHARED_CHILD | SDF_NEEDS_GROUPS)
  *               the same cache(s).
  * NEEDS_GROUPS: Caches are shared between groups.
  */
+// Domain中的cpu是否共享SOC上的资源（例如cache）。手机平台上，MC domain会设定该flag
 SD_FLAG(SD_SHARE_PKG_RESOURCES, SDF_SHARED_CHILD | SDF_NEEDS_GROUPS)
 
 /*

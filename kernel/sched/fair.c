@@ -282,12 +282,14 @@ static inline struct cfs_rq *task_cfs_rq(struct task_struct *p)
 }
 
 /* runqueue on which this entity is (to be) queued */
+// se所在的cfs rq
 static inline struct cfs_rq *cfs_rq_of(struct sched_entity *se)
 {
 	return se->cfs_rq;
 }
 
 /* runqueue "owned" by this group */
+// se所拥有的cfs_rq
 static inline struct cfs_rq *group_cfs_rq(struct sched_entity *grp)
 {
 	return grp->my_q;
@@ -3725,6 +3727,7 @@ static inline void add_tg_cfs_propagate(struct cfs_rq *cfs_rq, long runnable_sum
  * Since both these conditions indicate a changed cfs_rq->avg.load we should
  * call update_tg_load_avg() when this function returns true.
  */
+// 主要作用：更新cfs rq负载
 static inline int
 update_cfs_rq_load_avg(u64 now, struct cfs_rq *cfs_rq)
 {
@@ -3732,6 +3735,8 @@ update_cfs_rq_load_avg(u64 now, struct cfs_rq *cfs_rq)
 	struct sched_avg *sa = &cfs_rq->avg;
 	int decayed = 0;
 
+	// 有些task已经结束或者迁移走，负载记录在remove中(remove_entity_load_avg中记录)
+	// 还没有在cfs_rq中删除，这里要处理
 	if (cfs_rq->removed.nr) {
 		unsigned long r;
 		u32 divider = get_pelt_divider(&cfs_rq->avg);
@@ -3853,6 +3858,7 @@ static void attach_entity_load_avg(struct cfs_rq *cfs_rq, struct sched_entity *s
  * Must call update_cfs_rq_load_avg() before this, since we rely on
  * cfs_rq->avg.last_update_time being current.
  */
+// cfs_rq负载中减去se负载
 static void detach_entity_load_avg(struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
 	dequeue_load_avg(cfs_rq, se);
@@ -3898,6 +3904,8 @@ static inline void update_load_avg(struct cfs_rq *cfs_rq, struct sched_entity *s
 	// 3. [group se] 处理group se下的gcfs_rq->prop_runnable_sum传上来的avg变化，向上cfs_rq传播
 	decayed |= propagate_entity_load_avg(se);
 
+	// 注意：这里se->avg.last_update_time为0
+	// 表示只有task迁移场景才会attach，参考migrate_task_rq_fair
 	if (!se->avg.last_update_time && (flags & DO_ATTACH)) {
 
 		/*
@@ -3962,6 +3970,10 @@ static void sync_entity_load_avg(struct sched_entity *se)
  * Task first catches up with cfs_rq, and then subtract
  * itself from the cfs_rq (task must be off the queue now).
  */
+// 主要作用：把需要移除的负载记录在cfs_rq的removed成员中，
+// 真正的移除操作是发生在cfs rq负载更新的过程中，具体可以参考update_cfs_rq_load_avg函数
+// 与attach_entity_load_avg区别是不需要持rq锁
+// 调用者： task_dead_fair | unregister_fair_sched_group | migrate_task_rq_fair
 static void remove_entity_load_avg(struct sched_entity *se)
 {
 	struct cfs_rq *cfs_rq = cfs_rq_of(se);
@@ -4334,7 +4346,8 @@ static inline bool cfs_bandwidth_used(void);
  * this way we don't have the most up-to-date min_vruntime on the originating
  * CPU and an up-to-date min_vruntime on the destination CPU.
  */
-// 主要功能: 把调度实体se放入cfs_rq队列, 包括更新运行数据，放入rbtree
+// 主要功能: 把调度实体se放入cfs_rq队列, 1.更新运行数据，2.se放入rbtree
+// 调用栈：enqueue_task_fair | unthrottle_cfs_rq
 static void
 enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 {
@@ -4387,7 +4400,7 @@ enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 	se_update_runnable(se);
 	// 5. [group se]更新se权重se->load和负载se->avg.load_avg
 	update_cfs_group(se);
-	// 6. cfs_rq的权重增加se权重，cfs_rq->nr_running++
+	// 6. cfs_rq的权重加入se权重，cfs_rq->nr_running++
 	account_entity_enqueue(cfs_rq, se);
 
 	// 7. 如果是wakeup case，对se的vruntime做奖励，让它更快运行
@@ -5770,7 +5783,8 @@ static int sched_idle_cpu(int cpu)
  * increased. Here we update the fair scheduling stats and
  * then put the task into the rbtree:
  */
-// 主要功能：更新运行数据，把p对应的se放入rbtree
+// 主要功能：把p加入rq对应的运行队列
+// 1.更新运行数据，2.把p对应的se放入rbtree
 static void
 enqueue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 {
@@ -5799,7 +5813,7 @@ enqueue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 		cpufreq_update_util(rq, SCHED_CPUFREQ_IOWAIT);
 
 	// 1. 从p->se向上直到root group遍历enqueue
-	// 如果p->se所属的cfs_rq只有一个se, 说明p->se的父se也不在上级队列中，需要enqueue
+	// 如果p->se的parent se->on_rq为false，说明parent se之前也dequeue了，这里也需要enqueue
 	for_each_sched_entity(se) {
 		// se已经on_rq，不需要enqueue，break
 		if (se->on_rq)
@@ -5893,6 +5907,7 @@ static void set_next_buddy(struct sched_entity *se);
  * decreased. We remove the task from the rbtree and
  * update the fair scheduling stats:
  */
+// 把p从rq的运行队列上移除
 static void dequeue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 {
 	struct cfs_rq *cfs_rq;
@@ -6140,7 +6155,7 @@ static int wake_wide(struct task_struct *p)
  *			  scheduling latency of the CPUs. This seems to work
  *			  for the overloaded case.
  */
-// 主要功能：主要是看this_cpu是否可以，当this cpu是idle或者即将idle时
+// 主要功能：主要是看this_cpu是否可以，当this cpu是idle或者即将idle时选this
 static int
 wake_affine_idle(int this_cpu, int prev_cpu, int sync)
 {
@@ -6162,20 +6177,20 @@ wake_affine_idle(int this_cpu, int prev_cpu, int sync)
 		return available_idle_cpu(prev_cpu) ? prev_cpu : this_cpu;
 
 	/*
-     * 若同步唤醒且当前cpu上只有一个任务(也就是waker)在运行，就返回当前cpu，因为sync唤醒，
-     * 当前waker马上就要睡眠了。
+     * 若同步唤醒且当前cpu上只有一个任务(也就是waker)在运行，就返回当前cpu;
+     * 因为sync唤醒，当前waker马上就要睡眠了, this_cpu将进入idle。
      */
 	if (sync && cpu_rq(this_cpu)->nr_running == 1)
 		return this_cpu;
 
-	// 没选到
+	// this不满足idle要求
 	return nr_cpumask_bits;
 }
 
 // 主要功能：
 // 计算把p从prev移到this后满足：
 // this_cpu_load/this_cpu_cap < 108% * prev_cpu_load/prev_cpu_cap
-// 就选this，否则选prev
+// 就选this，否则选prev。 系数108%表示更偏好this
 static int
 wake_affine_weight(struct sched_domain *sd, struct task_struct *p,
 		   int this_cpu, int prev_cpu, int sync)
@@ -6205,7 +6220,7 @@ wake_affine_weight(struct sched_domain *sd, struct task_struct *p,
 
 	//prev_cpu::rq.cfs_rq->avg.load_avg
 	prev_eff_load = cpu_load(cpu_rq(prev_cpu));
-	prev_eff_load -= task_load; //这里为什么要减去？
+	prev_eff_load -= task_load;
 	if (sched_feat(WA_BIAS))
 		prev_eff_load *= 100 + (sd->imbalance_pct - 100) / 2; //MC和DIE都是乘以 100+(117-100)/2 = 108
 	prev_eff_load *= capacity_of(this_cpu);
@@ -6225,7 +6240,8 @@ wake_affine_weight(struct sched_domain *sd, struct task_struct *p,
 // this_cpu, prev_cpu二选一
 // 策略是：
 // 1. this_cpu是idle，且this和prev share cache，则选this
-// 2. this_cpu负载低于prev，选this，否则prev
+// 2. this_cpu负载低于108%*prev，选this，否则prev
+// 更偏好this
 static int wake_affine(struct sched_domain *sd, struct task_struct *p,
 		       int this_cpu, int prev_cpu, int sync)
 {
@@ -6257,7 +6273,7 @@ find_idlest_group(struct sched_domain *sd, struct task_struct *p, int this_cpu);
  */
 // 主要功能：sched group选最idle的CPU
 // 策略：
-// 	1. 选择idle中exit_latency最低的，即进入idle更晚的，
+// 	1. 选择idle中exit_latency最低的，或进入idle更晚的，
 // 	2. 如果没有idle cpu，就选load最低的cpu
 static int
 find_idlest_group_cpu(struct sched_group *group, struct task_struct *p, int this_cpu)
@@ -6275,7 +6291,7 @@ find_idlest_group_cpu(struct sched_group *group, struct task_struct *p, int this
 		return cpumask_first(sched_group_span(group));
 
 	/* Traverse only the allowed CPUs */
-	//DIE层级的sg,遍历这个cluster中任务p亲和性允许的cpu
+	//DIE层级的sg,如小核group(cpu0-cpu3)遍历这个group中且p亲和性允许的cpu
 	for_each_cpu_and(i, sched_group_span(group), p->cpus_ptr) {
 		if (sched_idle_cpu(i)) //若此cpu rq中只有SCHED_IDLE类型的任务，就选此cpu
 			return i;
@@ -6382,7 +6398,7 @@ static inline int find_idlest_cpu(struct sched_domain *sd, struct task_struct *p
 		for_each_domain(cpu, tmp) {
 			// 本层for循环中tmp第一次为mc，tmp->span_weight = 4
 			// 如果外层for循环的sd为mc，则退出；
-			// 如果外层for循环的sd为die =》 则外层循环的sd设置为new_cpu的mc sd，继续找
+			// 如果外层for循环的sd为die，则外层循环的sd设置为new_cpu的mc sd，继续找
 			if (weight <= tmp->span_weight)
 				break;
 			if (tmp->flags & sd_flag)
@@ -7379,7 +7395,7 @@ no_eas:
 	} else if (sd_flag & SD_BALANCE_WAKE) { /* XXX always ? */
 		/* Fast path */
 		// wakeup走fast path
-		// 4. 唤醒走fast path; 对于new_cpu再考虑一下，看sd内是否有idle的，如果有，还是选idle好；
+		// 4. 唤醒走fast path; 对于new_cpu再考虑一下，看new_cpu->sd内是否有idle的，如果有，还是选idle好；
 		new_cpu = select_idle_sibling(p, prev_cpu, new_cpu);
 
 		if (IS_ENABLED(CONFIG_ROCKCHIP_PERFORMANCE)) {
@@ -7414,6 +7430,12 @@ static void detach_entity_cfs_rq(struct sched_entity *se);
  * cfs_rq_of(p) references at time of call are still valid and identify the
  * previous CPU. The caller guarantees p->pi_lock or task_rq(p)->lock is held.
  */
+// 调用栈：set_task_cpu->migrate_task_rq->migrate_task_rq_fair
+// 两条调度路径：1：wakeup选核new cpu与old cpu不同，调用set_task_cpu(p, new_cpu)
+//				2: 迁移，move_queued_task
+// 调用顺序: dequeue_task -> set_task_cpu -> enqueue_task
+// 主要作用：task要从old cpu迁到new cpu；
+// 			这里要更新old cfs_rq负载，p->se->vruntime，exec_start等；
 static void migrate_task_rq_fair(struct task_struct *p, int new_cpu)
 {
 	/*
@@ -7448,6 +7470,7 @@ static void migrate_task_rq_fair(struct task_struct *p, int new_cpu)
 		 * rq->lock and can modify state directly.
 		 */
 		lockdep_assert_held(&task_rq(p)->lock);
+		// 持有rq->lock 可以直接更新cfs_rq->avg
 		detach_entity_cfs_rq(&p->se);
 
 	} else {
@@ -8094,10 +8117,15 @@ enum group_type {
 	group_overloaded
 };
 
+// 为了达到sched domain负载均衡的目标，本次迁移的类型为何？
 enum migration_type {
+	// 迁移一定量的负载
 	migrate_load = 0,
+	// 迁移一定量的utility
 	migrate_util,
+	// 迁移一定数量的任务
 	migrate_task,
+	// 迁移misfit task
 	migrate_misfit
 };
 
@@ -8109,29 +8137,54 @@ enum migration_type {
 #define LBF_NOHZ_AGAIN	0x20
 
 struct lb_env {
+	// 要进行负载均衡的sched domain
 	struct sched_domain	*sd;
 
+	// 该sd中最繁忙的那个cpu及其rq，均衡的目标就是从该cpu的rq拉取任务出来
 	struct rq		*src_rq;
 	int			src_cpu;
 
+	// 本次均衡的目标CPU。均衡操作试图从该sd的busiest cpu的rq拉取任务到 dest CPU rq，
+	// 从而完成本次sd的均衡动作。
+	// 第一轮均衡的dst cpu和dst rq一般设置为发起均衡的cpu及其rq，
+	// 后续如果需要，可以重新设定为local group中的其他cpu
 	int			dst_cpu;
 	struct rq		*dst_rq;
 
+	// dst_cpu所在sd的cpu mask，即本次均衡dest cpu所在的范围
 	struct cpumask		*dst_grpmask;
+	// 一般而言，均衡的dst cpu是发起均衡的cpu，但是，如果因为affinity的原因，
+	// src上有任务无法迁移到dst cpu，从而不能完成均衡操作的时候，
+	// 我们会选择一个新的（仍然在local group内）CPU作为dst cpu，发起第二轮均衡。
 	int			new_dst_cpu;
+	// 在进行均衡的时候，dst_cpu的idle状态，这个状态会影响均衡的走向
 	enum cpu_idle_type	idle;
+	// 量化有多少不平衡，具体不平衡类别由migration_type定义
 	long			imbalance;
 	/* The set of CPUs under consideration for load-balancing */
+	// Load_balance的过程中会有多轮的均衡操作，不同轮次的均衡会涉及不同的cpus，
+	// 这个成员指明了本次均衡有哪些CPUs参与
 	struct cpumask		*cpus;
 
+	// 标记负载均衡的标志。LBF_NOHZ_STATS和LBF_NOHZ_AGAIN主要用于负载均衡过程中更新nohz状态使用。
+	// 当选中的busiest cpu上的所有任务都因为affinity无法进行迁移，这时会设置LBF_ALL_PINNED，
+	// 负载均衡会寻找次忙CPU进行下一轮的均衡。LBF_NEED_BREAK主要用来减少均衡过程中关中断时间的
 	unsigned int		flags;
 
+	// 如果确定需要通过迁移任务来保持负载均衡，
+	// 那么load_balance函数会通过循环遍历src rq上的cfs task链表来确定迁移的任务数量。
+	// Loop会跟踪循环的次数，其值不能大于Loop_max
 	unsigned int		loop;
+	// 如果一次迁移任务数量比较多，那么每迁移sched_nr_migrate_break个任务就休息一下，
+	// 让关中断的临界区小一点
 	unsigned int		loop_break;
+	// 扫描dest cpu运行队列的最大次数
 	unsigned int		loop_max;
 
 	enum fbq_type		fbq_type;
+	// 为了达到sched domain负载均衡的目标，本次迁移的类型为何？有四种迁移类型
 	enum migration_type	migration_type;
+	// 需要进行迁移的任务链表
 	struct list_head	tasks;
 	struct rq_flags		*src_rq_rf;
 };
@@ -8168,6 +8221,7 @@ static int task_hot(struct task_struct *p, struct lb_env *env)
 	if (sysctl_sched_migration_cost == 0)
 		return 0;
 
+	// 距离p上次执行的时间很近，认为是cache hot
 	delta = rq_clock_task(env->src_rq) - p->se.exec_start;
 
 	return delta < (s64)sysctl_sched_migration_cost;
@@ -8236,6 +8290,7 @@ static inline int migrate_degrades_locality(struct task_struct *p,
 /*
  * can_migrate_task - may task p from runqueue rq be migrated to this_cpu?
  */
+// 主要作用：判断task是否可以被迁移
 static
 int can_migrate_task(struct task_struct *p, struct lb_env *env)
 {
@@ -8255,13 +8310,16 @@ int can_migrate_task(struct task_struct *p, struct lb_env *env)
 	 * 3) running (obviously), or
 	 * 4) are cache-hot on their current CPU.
 	 */
+	// 1. p所在的cfs_rq在scr cpu或dst cpu上被throttle的，不要migrate
 	if (throttled_lb_pair(task_group(p), env->src_cpu, env->dst_cpu))
 		return 0;
 
+	// 2. per cpu运行的kthread，不要migrate
 	/* Disregard pcpu kthreads; they are where they need to be. */
 	if (kthread_is_per_cpu(p))
 		return 0;
 
+	// 3. p的亲和性cpu不包含dst_cpu, 不要migrate
 	if (!cpumask_test_cpu(env->dst_cpu, p->cpus_ptr)) {
 		int cpu;
 
@@ -8281,6 +8339,7 @@ int can_migrate_task(struct task_struct *p, struct lb_env *env)
 			return 0;
 
 		/* Prevent to re-select dst_cpu via env's CPUs: */
+		// p不亲和dst_cpu，在dst_cpu所在sd的其他组中找1个作为new_dst_cpu
 		for_each_cpu_and(cpu, env->dst_grpmask, env->cpus) {
 			if (cpumask_test_cpu(cpu, p->cpus_ptr)) {
 				env->flags |= LBF_DST_PINNED;
@@ -8295,6 +8354,7 @@ int can_migrate_task(struct task_struct *p, struct lb_env *env)
 	/* Record that we found atleast one task that could run on dst_cpu */
 	env->flags &= ~LBF_ALL_PINNED;
 
+	// 4. p正在运行，不要migrate
 	if (task_running(env->src_rq, p)) {
 		schedstat_inc(p->se.statistics.nr_failed_migrations_running);
 		return 0;
@@ -8306,10 +8366,12 @@ int can_migrate_task(struct task_struct *p, struct lb_env *env)
 	 * 2) task is cache cold, or
 	 * 3) too many balance attempts have failed.
 	 */
+	// numa相关，==-1
 	tsk_cache_hot = migrate_degrades_locality(p, env);
 	if (tsk_cache_hot == -1)
 		tsk_cache_hot = task_hot(p, env);
 
+	// 5. task非cache hot，或者balance failed次数太多，只能强制migrate
 	if (tsk_cache_hot <= 0 ||
 	    env->sd->nr_balance_failed > env->sd->cache_nice_tries) {
 		if (tsk_cache_hot == 1) {
@@ -8385,6 +8447,9 @@ static const unsigned int sched_nr_migrate_break = 32;
  *
  * Returns number of detached tasks if successful and 0 otherwise.
  */
+// 主要作用：从src_rq上detach掉一些task，直到平衡
+// 迁出的tasks放在链表env->tasks中
+// 返回迁出tasks个数
 static int detach_tasks(struct lb_env *env)
 {
 	struct list_head *tasks = &env->src_rq->cfs_tasks;
@@ -8413,6 +8478,7 @@ static int detach_tasks(struct lb_env *env)
 			break;
 
 		/* take a breather every nr_migrate tasks */
+		// 每处理32个task，休息一下，避免持有太多时间锁
 		if (env->loop > env->loop_break) {
 			env->loop_break += sched_nr_migrate_break;
 			env->flags |= LBF_NEED_BREAK;
@@ -8422,6 +8488,7 @@ static int detach_tasks(struct lb_env *env)
 		if (!can_migrate_task(p, env))
 			goto next;
 
+		// 不平衡有几种类别，计算把task迁走后，env->imbalance的值
 		switch (env->migration_type) {
 		case migrate_load:
 			/*
@@ -8490,11 +8557,13 @@ static int detach_tasks(struct lb_env *env)
 		 * We only want to steal up to the prescribed amount of
 		 * load/util/tasks.
 		 */
+		// balance了，跳出
 		if (env->imbalance <= 0)
 			break;
 
 		continue;
 next:
+		// 下一个task
 		list_move(&p->se.group_node, tasks);
 	}
 
@@ -8538,6 +8607,7 @@ static void attach_one_task(struct rq *rq, struct task_struct *p)
  * attach_tasks() -- attaches all tasks detached by detach_tasks() to their
  * new rq.
  */
+// 把迁出的任务env->tasks，迁入dst_rq
 static void attach_tasks(struct lb_env *env)
 {
 	struct list_head *tasks = &env->tasks;
@@ -8691,6 +8761,8 @@ static bool __update_blocked_fair(struct rq *rq, bool *done)
  * This needs to be done in a top-down fashion because the load of a child
  * group is a fraction of its parents load.
  */
+// cfs_rq->avg.load_avg表示的负载相对于当前group层的负载
+// 本函数功能：计算cfs_rq相对于顶层rq->cfs_rq的负载cfs_rq->h_load
 static void update_cfs_rq_h_load(struct cfs_rq *cfs_rq)
 {
 	struct rq *rq = rq_of(cfs_rq);
@@ -8702,6 +8774,7 @@ static void update_cfs_rq_h_load(struct cfs_rq *cfs_rq)
 		return;
 
 	WRITE_ONCE(cfs_rq->h_load_next, NULL);
+	// 1. 先从下向上建立se到顶层se的链接
 	for_each_sched_entity(se) {
 		cfs_rq = cfs_rq_of(se);
 		WRITE_ONCE(cfs_rq->h_load_next, se);
@@ -8709,11 +8782,14 @@ static void update_cfs_rq_h_load(struct cfs_rq *cfs_rq)
 			break;
 	}
 
+	// root group：se==null
 	if (!se) {
 		cfs_rq->h_load = cfs_rq_load_avg(cfs_rq);
 		cfs_rq->last_h_load_update = now;
 	}
 
+	// 2. 沿着1中建立的链接，从上到下计算
+	// 公式: gcfs_rq->load = cfs_rq->load * (se->avg.load_avg / cfs_rq->avg.load_avg)
 	while ((se = READ_ONCE(cfs_rq->h_load_next)) != NULL) {
 		load = cfs_rq->h_load;
 		load = div64_ul(load * se->avg.load_avg,
@@ -8724,6 +8800,9 @@ static void update_cfs_rq_h_load(struct cfs_rq *cfs_rq)
 	}
 }
 
+// 计算p->se相对于root group的负载
+// 由于 task_h_load / p->se.avg.load_avg = cfs_rq->h_load / cfs_rq->avg.load_avg
+// => task_h_load = p->se.avg.load_avg * (cfs_rq->h_load / cfs_rq->avg.load_avg)
 static unsigned long task_h_load(struct task_struct *p)
 {
 	struct cfs_rq *cfs_rq = task_cfs_rq(p);
@@ -8760,7 +8839,9 @@ static void update_blocked_averages(int cpu)
 	rq_lock_irqsave(rq, &rf);
 	update_rq_clock(rq);
 
+	// 更新rt,dl,thermal,irq负载
 	decayed |= __update_blocked_others(rq, &done);
+	// 更新cfs负载
 	decayed |= __update_blocked_fair(rq, &done);
 
 	update_blocked_load_status(rq, !done);
@@ -8774,22 +8855,32 @@ static void update_blocked_averages(int cpu)
 /*
  * sg_lb_stats - stats of a sched_group required for load_balancing
  */
+// 在负载均衡的时候，通过sg_lb_stats数据结构来表示sched group的负载统计信息
 struct sg_lb_stats {
+	// 该sched group上每个CPU的平均负载。
+	// 仅在sched group处于group_overloaded状态下才计算该值，方便计算迁移负载量
 	// sgs->avg_load = (sgs->group_load * SCHED_CAPACITY_SCALE) / sgs->group_capacity;
 	unsigned long avg_load; /*Avg load across the CPUs of the group */
-	// 对应avg.load_avg
+	// 该sched group上所有CPU的负载(avg.load_avg)之和
 	unsigned long group_load; /* Total load over the CPUs of the group */
+	// 该sched group的所有cpu算力之和。这里的cpu算力是指可以用于cfs任务的算力
 	unsigned long group_capacity;
-	// avg.util_avg
+	// 该sched group上所有CPU利用率(avg.util_avg)之和
 	unsigned long group_util; /* Total utilization over the CPUs of the group */
-	// avg.runnable_avg
+	// 该sched group上所有CPU的运行负载(avg.runnable_avg)之和
 	unsigned long group_runnable; /* Total runnable time over the CPUs of the group */
+	// 该sched group上所有任务的数量，包括rt、dl任务
 	unsigned int sum_nr_running; /* Nr of tasks running in the group */
+	// 该sched group上所有cfs任务的数量
 	unsigned int sum_h_nr_running; /* Nr of CFS tasks running in the group */
+	// 该group中idle cpu的数量
 	unsigned int idle_cpus;
+	// 该group中的cpu数量
 	unsigned int group_weight;
+	// 该group在负载均衡时候所处的状态
 	enum group_type group_type;
 	unsigned int group_asym_packing; /* Tasks should be moved to preferred CPU */
+	// 该组内至少有一个cpu上有misfit task，这里记录了该组所有CPU中，misfit task load最大的值
 	unsigned long group_misfit_task_load; /* A CPU has a task too big for its capacity */
 #ifdef CONFIG_NUMA_BALANCING
 	unsigned int nr_numa_running;
@@ -8801,15 +8892,24 @@ struct sg_lb_stats {
  * sd_lb_stats - Structure to store the statistics of a sched_domain
  *		 during load balancing.
  */
+// 在负载均衡的时候，通过sd_lb_stats数据结构来表示sched domain的负载统计信息
 struct sd_lb_stats {
+	// 该sched domain中，最繁忙的那个sched group（非local group）
 	struct sched_group *busiest;	/* Busiest group in this sd */
+	// 在该sched domain上进行均衡的时候，标记该sd中哪一个group是local group，
+	// 即dest cpu所在的group
 	struct sched_group *local;	/* Local group in this sd */
+	// 该sched domain中所有sched group的负载之和。负载指cfs任务的负载
 	unsigned long total_load;	/* Total load of all groups in sd */
+	// 该sched domain中所有sched group的CPU算力之和（可以用于cfs task的算力）
 	unsigned long total_capacity;	/* Total capacity of all groups in sd */
+	// 该sched domain中sched groups的平均负载
 	unsigned long avg_load;	/* Average load across all groups in sd */
 	unsigned int prefer_sibling; /* tasks should go to sibling first */
 
+	// 本sched domain中最忙的那个sched group的负载统计信息
 	struct sg_lb_stats busiest_stat;/* Statistics of the busiest group */
+	// dest cpu所在的本地sched group的负载统计
 	struct sg_lb_stats local_stat;	/* Statistics of the local group */
 };
 
@@ -10283,6 +10383,7 @@ static int need_active_balance(struct lb_env *env)
 
 static int active_load_balance_cpu_stop(void *data);
 
+// 判断dst_cpu是否可以做balance
 static int should_we_balance(struct lb_env *env)
 {
 	struct sched_group *sg = env->sd->groups;
@@ -10309,9 +10410,12 @@ static int should_we_balance(struct lb_env *env)
 	 * In the newly idle case, we will allow all the CPUs
 	 * to do the newly idle load balance.
 	 */
+	// 1. newly idle balance都可以做
 	if (env->idle == CPU_NEWLY_IDLE)
 		return 1;
 
+	// 2. MC sd下group只有1个cpu，可以做balance
+	// DIE sd下group多个cpu，只需要其中1个做balance
 	/* Try to find first idle CPU */
 	for_each_cpu_and(cpu, group_balance_mask(sg), env->cpus) {
 		if (!idle_cpu(cpu))
@@ -10329,6 +10433,7 @@ static int should_we_balance(struct lb_env *env)
  * Check this_cpu to ensure it is balanced within domain. Attempt to move
  * tasks if there is an imbalance.
  */
+// 在@sd中找最busiest的group中最busiest的cpu中的tasks，把tasks pull到this_rq
 static int load_balance(int this_cpu, struct rq *this_rq,
 			struct sched_domain *sd, enum cpu_idle_type idle,
 			int *continue_balancing)
@@ -10357,17 +10462,20 @@ static int load_balance(int this_cpu, struct rq *this_rq,
 	schedstat_inc(sd->lb_count[idle]);
 
 redo:
+	// 看dst_cpu是否适合做balance
 	if (!should_we_balance(&env)) {
 		*continue_balancing = 0;
 		goto out_balanced;
 	}
 
+	// sd下找最busy的group
 	group = find_busiest_group(&env);
 	if (!group) {
 		schedstat_inc(sd->lb_nobusyg[idle]);
 		goto out_balanced;
 	}
 
+	// group中找最busy的cpu
 	busiest = find_busiest_queue(&env, group);
 	if (!busiest) {
 		schedstat_inc(sd->lb_nobusyq[idle]);
@@ -10444,6 +10552,7 @@ more_balance:
 		 * moreover subsequent load balance cycles should correct the
 		 * excess load moved.
 		 */
+		// p不亲和dst_cpu，换一个在同sd中的cpu作为dst_cpu
 		if ((env.flags & LBF_DST_PINNED) && env.imbalance > 0) {
 
 			/* Prevent to re-select dst_cpu via env's CPUs */
@@ -10466,6 +10575,7 @@ more_balance:
 		 * We failed to reach balance because of affinity.
 		 */
 		if (sd_parent) {
+			// sgc->imbalance affinity导致的不均衡
 			int *group_imbalance = &sd_parent->groups->sgc->imbalance;
 
 			if ((env.flags & LBF_SOME_PINNED) && env.imbalance > 0)
@@ -10561,6 +10671,7 @@ more_balance:
 	goto out;
 
 out_balanced:
+	// 已经平衡了
 	/*
 	 * We reach balance although we may have faced some affinity
 	 * constraints. Clear the imbalance flag only if other tasks got
@@ -10574,6 +10685,7 @@ out_balanced:
 	}
 
 out_all_pinned:
+	// 所有task都绑核，无法迁移了
 	/*
 	 * We reach balance because all tasks are pinned at this level so
 	 * we can't migrate them. Let the imbalance flag set so parent level
@@ -10604,11 +10716,13 @@ out:
 	return ld_moved;
 }
 
+// 计算sd上进行balance的时间间隔；控制balance频率，不能太频繁
 static inline unsigned long
 get_sd_balance_interval(struct sched_domain *sd, int cpu_busy)
 {
 	unsigned long interval = sd->balance_interval;
 
+	// cpu busy, 间隔更大些
 	if (cpu_busy)
 		interval *= sd->busy_factor;
 
@@ -10749,6 +10863,11 @@ void update_max_interval(void)
  *
  * Balancing parameters are set up in init_sched_domains.
  */
+// 主要功能：
+// 1. 更新load balance的最大开销
+// 2. 从MC->DIE 执行load_balance
+// 3. 确定next_balance时间
+// 参数：@rq 当前执行本函数的cpu rq
 static void rebalance_domains(struct rq *rq, enum cpu_idle_type idle)
 {
 	int continue_balancing = 1;
@@ -10760,6 +10879,7 @@ static void rebalance_domains(struct rq *rq, enum cpu_idle_type idle)
 	unsigned long next_balance = jiffies + 60*HZ;
 	int update_next_balance = 0;
 	int need_serialize, need_decay = 0;
+	// balance最大总开销
 	u64 max_cost = 0;
 
 	trace_android_rvh_sched_rebalance_domains(rq, &continue_balancing);
@@ -10767,15 +10887,18 @@ static void rebalance_domains(struct rq *rq, enum cpu_idle_type idle)
 		return;
 
 	rcu_read_lock();
+	// MC -> DIE
 	for_each_domain(cpu, sd) {
 		/*
 		 * Decay the newidle max times here because this is a regular
 		 * visit to all the domains. Decay ~1% per second.
 		 */
 		if (time_after(jiffies, sd->next_decay_max_lb_cost)) {
+			// sd->max_newidle_lb_cost表示在该sd上执行balance的最大开销
+			// 每秒衰减1次，每次1%
 			sd->max_newidle_lb_cost =
 				(sd->max_newidle_lb_cost * 253) / 256;
-			sd->next_decay_max_lb_cost = jiffies + HZ;
+			sd->next_decay_max_lb_cost = jiffies + HZ; // 每秒1次
 			need_decay = 1;
 		}
 		max_cost += sd->max_newidle_lb_cost;
@@ -10800,6 +10923,7 @@ static void rebalance_domains(struct rq *rq, enum cpu_idle_type idle)
 		}
 
 		if (time_after_eq(jiffies, sd->last_balance + interval)) {
+			// 执行balance
 			if (load_balance(cpu, rq, sd, idle, &continue_balancing)) {
 				/*
 				 * The LBF_DST_PINNED logic could have changed
@@ -10809,6 +10933,7 @@ static void rebalance_domains(struct rq *rq, enum cpu_idle_type idle)
 				idle = idle_cpu(cpu) ? CPU_IDLE : CPU_NOT_IDLE;
 				busy = idle != CPU_IDLE && !sched_idle_cpu(cpu);
 			}
+			// 记录本次balance时间戳
 			sd->last_balance = jiffies;
 			interval = get_sd_balance_interval(sd, busy);
 		}
@@ -10835,6 +10960,7 @@ out:
 	 * When the cpu is attached to null domain for ex, it will not be
 	 * updated.
 	 */
+	// 确定next balance时间
 	if (likely(update_next_balance)) {
 		rq->next_balance = next_balance;
 
@@ -11459,6 +11585,7 @@ out:
  * run_rebalance_domains is triggered when needed from the scheduler tick.
  * Also triggered for nohz idle balancing (with nohz_balancing_kick set).
  */
+// tigger：scheduler_tick | nohz_balancer_kick
 static __latent_entropy void run_rebalance_domains(struct softirq_action *h)
 {
 	struct rq *this_rq = this_rq();
@@ -11473,6 +11600,7 @@ static __latent_entropy void run_rebalance_domains(struct softirq_action *h)
 	 * load balance only within the local sched_domain hierarchy
 	 * and abort nohz_idle_balance altogether if we pull some load.
 	 */
+	// 优先执行nohz balance
 	if (nohz_idle_balance(this_rq, idle))
 		return;
 
@@ -11490,6 +11618,7 @@ void trigger_load_balance(struct rq *rq)
 	if (unlikely(on_null_domain(rq)))
 		return;
 
+	// 在next_balance时间之后做
 	if (time_after_eq(jiffies, rq->next_balance))
 		raise_softirq(SCHED_SOFTIRQ);
 
@@ -11662,6 +11791,10 @@ static void propagate_entity_cfs_rq(struct sched_entity *se)
 static void propagate_entity_cfs_rq(struct sched_entity *se) { }
 #endif
 
+// cfs_rq负载中减去se负载，并向上传播，主要用于task迁移或者换组
+// 调用者：migrate_task_rq_fair
+//		  switched_from_fair | task_move_group_fair
+//		  	detach_task_cfs_rq
 static void detach_entity_cfs_rq(struct sched_entity *se)
 {
 	struct cfs_rq *cfs_rq = cfs_rq_of(se);

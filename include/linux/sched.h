@@ -474,10 +474,12 @@ struct sched_entity {
 	struct list_head		group_node;
 	unsigned int			on_rq; // se为runnable，包括正在运行和等待调度状态
 
+	// update_curr时用来计算delta_exec = now - curr->exec_start;
+	// 可以理解为上次调用update_curr的时间戳
 	u64				exec_start;
-	u64				sum_exec_runtime;
-	u64				vruntime;
-	u64				prev_sum_exec_runtime;
+	u64				sum_exec_runtime; // 总运行物理时间(walltime)
+	u64				vruntime; // 虚拟时间，每个task相同
+	u64				prev_sum_exec_runtime; // 开始被调度执行时的总运行物理时间
 
 	u64				nr_migrations;
 

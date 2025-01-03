@@ -82,30 +82,49 @@ struct sched_domain_shared {
 
 struct sched_domain {
 	/* These fields must be setup */
+	// MC sd->parent == DIE sd
 	struct sched_domain __rcu *parent;	/* top domain must be null terminated */
+	// DIE sd->child == MC sd
 	struct sched_domain __rcu *child;	/* bottom domain must be null terminated */
+	// 调度组
 	struct sched_group *groups;	/* the balancing groups of the domain */
+	// 定义检查该sched domain均衡状态的时间间隔范围
 	unsigned long min_interval;	/* Minimum balance interval ms */
 	unsigned long max_interval;	/* Maximum balance interval ms */
+	// 如果cpu繁忙，那么均衡要时间间隔长一些，即时间间隔定义为busy_factor * balance_interval
 	unsigned int busy_factor;	/* less balancing by factor if busy */
+	// 定义判定不均衡的水位线
 	unsigned int imbalance_pct;	/* No balance until over watermark */
+	// 和nr_balance_failed配合控制负载均衡过程的迁移力度。
+	// 当nr_balance_failed大于cache_nice_tries的时候，负载均衡会变得更加激进。
 	unsigned int cache_nice_tries;	/* Leave cache hot tasks for # tries */
 
 	int nohz_idle;			/* NOHZ IDLE status */
+	// 调度域标志, sched/sd_flags.h定义
 	int flags;			/* See SD_* */
+	// Base sched domain的level等于0，向上依次加一
 	int level;
 
 	/* Runtime fields. */
+	// 上次进行balance的时间点
 	unsigned long last_balance;	/* init to jiffies. units in jiffies */
+	// 该sched domain均衡的基础时间间隔
 	unsigned int balance_interval;	/* initialise to 1. units in ms. */
+	// 本sched domain中进行负载均衡失败的次数。
+	// 当失败次数大于cache_nice_tries的时候，我们考虑迁移cache hot的任务，进行更激进的均衡操作
 	unsigned int nr_balance_failed; /* initialise to 0 */
 
 	/* idle_balance() stats */
+	// 在该domain上进行newidle balance的最大耗时（即newidle balance的开销）
 	u64 max_newidle_lb_cost;
+	// max_newidle_lb_cost会记录最近在该sched domain上进行newidle balance的最大耗时，
+	// 这个max cost不是一成不变的，它有一个衰减过程，每秒衰减1%，这个成员就是用来控制衰减的。
 	unsigned long next_decay_max_lb_cost;
 
+	// 平均扫描成本
 	u64 avg_scan_cost;		/* select_idle_sibling */
 
+	// 负载均衡的统计信息
 #ifdef CONFIG_SCHEDSTATS
 	/* load_balance() stats */
 	unsigned int lb_count[CPU_MAX_IDLE_TYPES];
@@ -144,9 +163,14 @@ struct sched_domain {
 		void *private;		/* used during construction */
 		struct rcu_head rcu;	/* used during destruction */
 	};
+	// Sched domain是per-CPU的，然而有一些信息是需要在per-CPU 的sched domain之间共享的，
+	// 不能在每个sched domain上构建。这些共享信息是：
+	// 1、该sched domain中的busy cpu的个数
+	// 2、该sched domain中是否有idle的cpu
 	struct sched_domain_shared *shared;
 
-	unsigned int span_weight; // 该调度域下包含的cpu数量
+	// 该调度域下包含的cpu数量
+	unsigned int span_weight;
 
 	ANDROID_KABI_RESERVE(1);
 	ANDROID_KABI_RESERVE(2);
