@@ -1711,8 +1711,11 @@ void activate_task(struct rq *rq, struct task_struct *p, int flags)
 }
 EXPORT_SYMBOL_GPL(activate_task);
 
-// 主要作用：设置p->on_rq：阻塞时为0，迁移时为TASK_ON_RQ_MIGRATING；把p移出运行队列
-// 调用者：__schedule|migrate_tasks|__migrate_swap_task|move_queued_task
+// 主要作用：
+// 		1. 设置p->on_rq：阻塞时为0，迁移时为TASK_ON_RQ_MIGRATING；
+//		2. 把p移出运行队列
+// 调用者：__schedule|migrate_tasks|__migrate_swap_task|move_queued_task|detach_task
+//		  只有__schedule时，p->on_rq == 0，其他调用者都是TASK_ON_RQ_MIGRATING
 void deactivate_task(struct rq *rq, struct task_struct *p, int flags)
 {
 	p->on_rq = (flags & DEQUEUE_SLEEP) ? 0 : TASK_ON_RQ_MIGRATING;
@@ -2182,9 +2185,10 @@ out_free_mask:
 }
 
 // 主要作用：
-// task发生cpu切换时，dequeue后，enqueue前
-// 1. 更新p所在old rq的状态，如cfs_rq的负载减去p负载
-// 2. 更新p状态，如vruntime-=old_cfs_rq->vruntime，wake_cpu=new_cpu，p->se.cfs_rq等
+// task发生cpu切换时，dequeue后，enqueue前调用
+// 1. 更新p所在old rq的状态，如old cfs_rq的负载去除p负载
+// 2. 更新p状态，如p->se.avg.last_update_time=0，
+//				  vruntime-=old_cfs_rq->vruntime，wake_cpu=new_cpu，p->se.cfs_rq = new_cpu rq等
 // 调用者：
 // 	1. wakup选核：try_to_wake_up|sched_ttwu_pending
 //	2. cfs load balance相关：load_balance -> detach_tasks -> detach_task
