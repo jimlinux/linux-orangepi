@@ -8151,7 +8151,7 @@ struct lb_env {
 	int			dst_cpu;
 	struct rq		*dst_rq;
 
-	// dst_cpu所在sd的cpu mask，即本次均衡dest cpu所在的范围
+	// dst_cpu所在sched group的cpu mask, MC的sg中1个，DIE的sg中多个
 	struct cpumask		*dst_grpmask;
 	// 一般而言，均衡的dst cpu是发起均衡的cpu，但是，如果因为affinity的原因，
 	// src上有任务无法迁移到dst cpu，从而不能完成均衡操作的时候，
@@ -8339,7 +8339,7 @@ int can_migrate_task(struct task_struct *p, struct lb_env *env)
 			return 0;
 
 		/* Prevent to re-select dst_cpu via env's CPUs: */
-		// p不亲和dst_cpu，在dst_cpu所在sd的其他组中找1个作为new_dst_cpu
+		// p不亲和dst_cpu，在dst_cpu所在sg中找另1个作为new_dst_cpu
 		for_each_cpu_and(cpu, env->dst_grpmask, env->cpus) {
 			if (cpumask_test_cpu(cpu, p->cpus_ptr)) {
 				env->flags |= LBF_DST_PINNED;
@@ -9805,6 +9805,7 @@ static inline void update_sd_lb_stats(struct lb_env *env, struct sd_lb_stats *sd
 		env->flags |= LBF_NOHZ_STATS;
 #endif
 
+	// sd内遍历sg
 	do {
 		struct sg_lb_stats *sgs = &tmp_sgs;
 		int local_group;
@@ -10433,7 +10434,14 @@ static int should_we_balance(struct lb_env *env)
  * Check this_cpu to ensure it is balanced within domain. Attempt to move
  * tasks if there is an imbalance.
  */
-// 在@sd中找最busiest的group中最busiest的cpu中的tasks，把tasks pull到this_rq
+// 主要功能：在@sd中找最busiest的group中最busiest的cpu中的tasks，把tasks pull到this_rq
+
+// @sd 本次均衡的范围，即本次均衡要保证该sched domain上各个group处于负载平衡状态
+// @idle 可以识别new idle load balance和tick balance
+// @continue_balancing 负载均衡是从发起CPU的base domain开始，
+// 					   不断向上，直到顶层的sched domain。
+//					   continue_balancing是用来控制是否继续进行上层sched domain的均衡
+// 返回值：本次负载均衡迁移的任务总数
 static int load_balance(int this_cpu, struct rq *this_rq,
 			struct sched_domain *sd, enum cpu_idle_type idle,
 			int *continue_balancing)
@@ -10449,6 +10457,7 @@ static int load_balance(int this_cpu, struct rq *this_rq,
 		.sd		= sd,
 		.dst_cpu	= this_cpu,
 		.dst_rq		= this_rq,
+		// dst_cpu所在调度组包含的cpus，MC sd的sg中，只有1个cpu; DIE有多个
 		.dst_grpmask    = sched_group_span(sd->groups),
 		.idle		= idle,
 		.loop_break	= sched_nr_migrate_break,
@@ -10457,6 +10466,7 @@ static int load_balance(int this_cpu, struct rq *this_rq,
 		.tasks		= LIST_HEAD_INIT(env.tasks),
 	};
 
+	// 参与均衡的cpus，需要在sd域内
 	cpumask_and(cpus, sched_domain_span(sd), cpu_active_mask);
 
 	schedstat_inc(sd->lb_count[idle]);
@@ -10497,7 +10507,10 @@ redo:
 		 * still unbalanced. ld_moved simply stays zero, so it is
 		 * correctly treated as an imbalance.
 		 */
+		// 在拉取任务之前，我们先设定all pinned标志。
+		// 当然后续如果发现不是all pinned的状况就会清除这个标志
 		env.flags |= LBF_ALL_PINNED;
+		// 一次均衡最多迁移task个数
 		env.loop_max  = min(sysctl_sched_nr_migrate, busiest->nr_running);
 
 more_balance:
@@ -10509,6 +10522,9 @@ more_balance:
 		 * cur_ld_moved - load moved in current iteration
 		 * ld_moved     - cumulative load moved across iterations
 		 */
+		// ld_moved记录了总共迁移的任务数量
+		// cur_ld_moved是本轮迁移的任务数
+		// detach_tasks函数用来从busiest cpu的rq中摘取适合的任务
 		cur_ld_moved = detach_tasks(&env);
 
 		/*
@@ -10521,6 +10537,7 @@ more_balance:
 
 		rq_unlock(busiest, &rf);
 
+		// 将detach_tasks函数摘下的任务挂入到dst rq上去
 		if (cur_ld_moved) {
 			attach_tasks(&env);
 			ld_moved += cur_ld_moved;
@@ -10528,6 +10545,8 @@ more_balance:
 
 		local_irq_restore(rf.flags);
 
+		// 在任务迁移过程中，src cpu的中断是关闭的，为了降低这个关中断时间，
+		// 迁移大量任务的时候需要break一下
 		if (env.flags & LBF_NEED_BREAK) {
 			env.flags &= ~LBF_NEED_BREAK;
 			goto more_balance;
@@ -10552,14 +10571,17 @@ more_balance:
 		 * moreover subsequent load balance cycles should correct the
 		 * excess load moved.
 		 */
-		// p不亲和dst_cpu，换一个在同sd中的cpu作为dst_cpu
+		// 如果sched domain仍然未达均衡均衡状态，并且在之前的均衡过程中，
+		// 有因为affinity的原因导致任务无法迁移到dest cpu，这时候要继续在src rq上搜索任务，
+		// 迁移到备选的dest cpu，因此，这里再次发起均衡操作。
+		// 这里的均衡上下文的dest cpu设定为备选的cpu，loop也被清零，重新开始扫描
 		if ((env.flags & LBF_DST_PINNED) && env.imbalance > 0) {
 
 			/* Prevent to re-select dst_cpu via env's CPUs */
 			__cpumask_clear_cpu(env.dst_cpu, env.cpus);
 
 			env.dst_rq	 = cpu_rq(env.new_dst_cpu);
-			env.dst_cpu	 = env.new_dst_cpu;
+			env.dst_cpu	 = env.new_dst_cpu; // new_dst_cpu与dst_cpu在同一个sg中
 			env.flags	&= ~LBF_DST_PINNED;
 			env.loop	 = 0;
 			env.loop_break	 = sched_nr_migrate_break;
@@ -10574,6 +10596,10 @@ more_balance:
 		/*
 		 * We failed to reach balance because of affinity.
 		 */
+		// 本层次的sched domain因为affinity而无法达到均衡状态，
+		// 我们需要把这个状态标记到上层sched domain的group中去，
+		// 在上层sched domain进行均衡的时候，该group会被判定为group_imbalanced，
+		// 从而有更大的机会选定为busiest group，从而解决该sched domain的均衡问题
 		if (sd_parent) {
 			// sgc->imbalance affinity导致的不均衡
 			int *group_imbalance = &sd_parent->groups->sgc->imbalance;
@@ -10583,6 +10609,9 @@ more_balance:
 		}
 
 		/* All tasks on this runqueue were pinned by CPU affinity */
+		// 如果选中的busiest cpu上的任务全部都是通过affinity锁定在了该cpu上，
+		// 那么清除该cpu（为了确保下轮均衡不考虑该cpu），再次发起均衡。
+		// 这种情况下，需要重新搜索source cpu，因此跳转到redo
 		if (unlikely(env.flags & LBF_ALL_PINNED)) {
 			__cpumask_clear_cpu(cpu_of(busiest), cpus);
 			/*
@@ -10602,6 +10631,8 @@ more_balance:
 		}
 	}
 
+	// source rq上的cfs任务链表已经被遍历（也可能遍历多次），
+	// 基本上对runnable 任务的扫描已经到位了，如果不行就只能考虑running task了
 	if (!ld_moved) {
 		schedstat_inc(sd->lb_failed[idle]);
 		/*

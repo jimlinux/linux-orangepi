@@ -529,6 +529,7 @@ static inline bool cpumask_intersects(const struct cpumask *src1p,
  *
  * Returns 1 if *@src1p is a subset of *@src2p, else returns 0
  */
+// src1p是src2p的子集
 static inline int cpumask_subset(const struct cpumask *src1p,
 				 const struct cpumask *src2p)
 {
