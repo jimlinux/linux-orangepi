@@ -182,7 +182,7 @@ static u32 __accumulate_pelt_segments(u64 periods, u32 d1, u32 d3)
 // 		load: se传入!!se->on_rq, cfs_rq传入权重cfs_rq->load.weight
 //		runnable: se传入se_runnable(se)，cfs_rq传入cfs_rq->h_nr_running
 //		running: se传入cfs_rq->curr == se, cfs_rq传入cfs_rq->curr != NULL
-// 		返回值：periods
+// 		返回值：periods，表示是否进入新的周期
 static __always_inline u32
 accumulate_sum(u64 delta, struct sched_avg *sa,
 	       unsigned long load, unsigned long runnable, int running)

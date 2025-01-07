@@ -295,6 +295,7 @@ static inline struct cfs_rq *group_cfs_rq(struct sched_entity *grp)
 	return grp->my_q;
 }
 
+// 获取cgroup path
 static inline void cfs_rq_tg_path(struct cfs_rq *cfs_rq, char *path, int len)
 {
 	if (!path)
@@ -308,11 +309,22 @@ static inline void cfs_rq_tg_path(struct cfs_rq *cfs_rq, char *path, int len)
 		strlcpy(path, "(null)", len);
 }
 
+// 主要功能：
+// 把cfs_rq插入到链表rq->leaf_cfs_rq_list中
+// 规则：
+// 		1. 子cfs_rq在父cfs_rq之前
+//		2. top cfs_rq在链表末尾
+//		3. 当cfs_rq负载为0后，删除
+//		4. 调用者在循环中调用此函数：从cfs_rq开始沿着group树向上把父cfs_rq都插入
+// 作用：保存rq上所有有负载的cfs_rq, 用来update负载，例 __update_blocked_fair
+// 调用者：propagate_entity_cfs_rq ... 
 static inline bool list_add_leaf_cfs_rq(struct cfs_rq *cfs_rq)
 {
 	struct rq *rq = rq_of(cfs_rq);
 	int cpu = cpu_of(rq);
 
+	// tmp_alone_branch已经重置为rq->leaf_cfs_rq_list
+	// 表示从下向上add leaf处理已结束
 	if (cfs_rq->on_list)
 		return rq->tmp_alone_branch == &rq->leaf_cfs_rq_list;
 
@@ -335,6 +347,8 @@ static inline bool list_add_leaf_cfs_rq(struct cfs_rq *cfs_rq)
 		 * the list, this means to put the child at the tail
 		 * of the list that starts by parent.
 		 */
+		// 由于双向循环链表结构，放在parent->leaf_cfs_rq_list末尾即是
+		// 在它前一个
 		list_add_tail_rcu(&cfs_rq->leaf_cfs_rq_list,
 			&(cfs_rq->tg->parent->cfs_rq[cpu]->leaf_cfs_rq_list));
 		/*
@@ -342,6 +356,7 @@ static inline bool list_add_leaf_cfs_rq(struct cfs_rq *cfs_rq)
 		 * reset tmp_alone_branch to the beginning of the
 		 * list.
 		 */
+		// 找到父节点在链表上，重置tmp_alone_branch，处理结束
 		rq->tmp_alone_branch = &rq->leaf_cfs_rq_list;
 		return true;
 	}
@@ -351,12 +366,14 @@ static inline bool list_add_leaf_cfs_rq(struct cfs_rq *cfs_rq)
 		 * cfs rq without parent should be put
 		 * at the tail of the list.
 		 */
+		// top cfs_rq放在链表末尾
 		list_add_tail_rcu(&cfs_rq->leaf_cfs_rq_list,
 			&rq->leaf_cfs_rq_list);
 		/*
 		 * We have reach the top of a tree so we can reset
 		 * tmp_alone_branch to the beginning of the list.
 		 */
+		// 走到top cfs_rq了，重置，处理结束
 		rq->tmp_alone_branch = &rq->leaf_cfs_rq_list;
 		return true;
 	}
@@ -367,12 +384,20 @@ static inline bool list_add_leaf_cfs_rq(struct cfs_rq *cfs_rq)
 	 * tmp_alone_branch points to the begin of the branch
 	 * where we will add parent.
 	 */
+	// tmp_alone_branch用做处理中临时指针，
+	// 例：propagate_entity_cfs_rq
+	// 最开始rq->tmp_alone_branch == rq->leaf_cfs_rq_list
+	// 插入一个cfs_rq后，rq->tmp_alone_branch指向这个cfs_rq,
+	// 继续向上操作父cfs_rq, 保证父节点放在子节点之后
+	// 等从下向上处理完后，重置rq->tmp_alone_branch = rq->leaf_cfs_rq_list
 	list_add_rcu(&cfs_rq->leaf_cfs_rq_list, rq->tmp_alone_branch);
 	/*
 	 * update tmp_alone_branch to points to the new begin
 	 * of the branch
 	 */
+	// 移动指针，保证父节点放在子节点之后
 	rq->tmp_alone_branch = &cfs_rq->leaf_cfs_rq_list;
+	// 处理未结束
 	return false;
 }
 
@@ -487,7 +512,7 @@ static inline void cfs_rq_tg_path(struct cfs_rq *cfs_rq, char *path, int len)
 	if (path)
 		strlcpy(path, "(null)", len);
 }
-
+`
 static inline bool list_add_leaf_cfs_rq(struct cfs_rq *cfs_rq)
 {
 	return true;
@@ -3728,6 +3753,7 @@ static inline void add_tg_cfs_propagate(struct cfs_rq *cfs_rq, long runnable_sum
  * call update_tg_load_avg() when this function returns true.
  */
 // 主要作用：更新cfs rq负载
+// 返回值：decayed，表示now已经进入了新负载计算周期(一个周期=1024us)
 static inline int
 update_cfs_rq_load_avg(u64 now, struct cfs_rq *cfs_rq)
 {
@@ -8719,6 +8745,7 @@ static bool __update_blocked_others(struct rq *rq, bool *done)
 
 #ifdef CONFIG_FAIR_GROUP_SCHED
 
+// cfs rq上负载已经（衰减）至0
 static inline bool cfs_rq_is_decayed(struct cfs_rq *cfs_rq)
 {
 	if (cfs_rq->load.weight)
@@ -8765,6 +8792,7 @@ static bool __update_blocked_fair(struct rq *rq, bool *done)
 		 * There can be a lot of idle CPU cgroups.  Don't let fully
 		 * decayed cfs_rqs linger on the list.
 		 */
+		// cfs rq上负载已降为0
 		if (cfs_rq_is_decayed(cfs_rq))
 			list_del_leaf_cfs_rq(cfs_rq);
 
@@ -8851,6 +8879,14 @@ static unsigned long task_h_load(struct task_struct *p)
 }
 #endif
 
+/*
+ * CPU进入idle状态，并不意味着该CPU上的load avg的负载都是零，
+ * 原来运行在该CPU的任务负载仍然存在（虽然这些任务阻塞了），只不过是需要不断进行衰减。
+ * 因此，我们会在下面的场景中对CPU负载进行衰减：
+ * a. Nohz idle balance（更新所有idle cpu的blocked load）
+ * b. Newidle balance（更新本CPU的blocked load）
+ * c. Load balance（更新本CPU的blocked load）
+ */
 static void update_blocked_averages(int cpu)
 {
 	bool decayed = false, done = true;
@@ -9357,9 +9393,9 @@ static inline void update_sg_lb_stats(struct lb_env *env,
 /**
  * update_sd_pick_busiest - return 1 on busiest group
  * @env: The load balancing environment.
- * @sds: sched_domain statistics
- * @sg: sched_group candidate to be checked for being the busiest
- * @sgs: sched_group statistics
+ * @sds: sched_domain statistics - sd domain负载数据
+ * @sg: sched_group candidate to be checked for being the busiest - 当前sg
+ * @sgs: sched_group statistics - 当前sg的负载数据
  *
  * Determine if @sg is a busier group than the previously selected
  * busiest group.
@@ -9367,6 +9403,8 @@ static inline void update_sg_lb_stats(struct lb_env *env,
  * Return: %true if @sg is a busier group than the previously selected
  * busiest group. %false otherwise.
  */
+// 判断当前@sg，是否比目前选出的busiest group更忙
+// 返回值：@sg比目前busiest group更忙，返回true
 static bool update_sd_pick_busiest(struct lb_env *env,
 				   struct sd_lb_stats *sds,
 				   struct sched_group *sg,
@@ -9849,7 +9887,7 @@ find_idlest_group(struct sched_domain *sd, struct task_struct *p, int this_cpu)
  * @sds: variable to hold the statistics for this sched_domain.
  */
 // 主要功能：更新该sched domain上各个sched group的负载和算力，
-//			得到local group以及非local group最忙的那个group的负载信息
+//			得到local group以及非local group中busiest group的负载信息
 static inline void update_sd_lb_stats(struct lb_env *env, struct sd_lb_stats *sds)
 {
 	struct sched_domain *child = env->sd->child;
@@ -10161,7 +10199,7 @@ static struct sched_group *find_busiest_group(struct lb_env *env)
 	 * Compute the various statistics relevant for load balancing at
 	 * this level.
 	 */
-	// update负载
+	// update sd domain负载
 	update_sd_lb_stats(env, &sds);
 
 	// 系统为进入overutilized，EAS work，不进行负载均衡
@@ -10530,7 +10568,7 @@ static int should_we_balance(struct lb_env *env)
 		return 1;
 
 	// 2. MC sd下group只有1个cpu，可以做balance
-	// DIE sd下group多个cpu，只需要其中1个做balance
+	// DIE sd下group多个cpu，只需要其中1个idle做balance
 	/* Try to find first idle CPU */
 	for_each_cpu_and(cpu, group_balance_mask(sg), env->cpus) {
 		if (!idle_cpu(cpu))
@@ -10540,6 +10578,7 @@ static int should_we_balance(struct lb_env *env)
 		return cpu == env->dst_cpu;
 	}
 
+	// 3. 由sg组内第一个cpu做
 	/* Are we the first CPU of this group ? */
 	return group_balance_cpu(sg) == env->dst_cpu;
 }
@@ -10548,16 +10587,36 @@ static int should_we_balance(struct lb_env *env)
  * Check this_cpu to ensure it is balanced within domain. Attempt to move
  * tasks if there is an imbalance.
  */
-// 主要功能：在@sd中找最busiest的group中最busiest的cpu中的tasks，把tasks pull到this_rq
-
+// 主要功能：在@sd中找最busiest的group中最busiest的cpu作为src_cpu,
+//		把this_cpu(如果src_cpu上的tasks都不亲和this_cpu, 则要选同sg中的cpu做备选)作为dst_cpu,
+//		把scr_cpu上一些task pull到dst_cpu，使sd内负载均衡；
 // @this_cpu 本次要进行负载均衡的CPU。需要注意的是：对于new idle balance和tick balance而言，
 //			 this_cpu等于current cpu，在nohz idle balance场景中，this_cpu未必等于current cpu。
-// @sd 本次均衡的范围，即本次均衡要保证该sched domain上各个group处于负载平衡状态
+// @sd @this_cpu所在的sd，可以是MC或DIE
 // @idle 可以识别new idle load balance和tick balance
 // @continue_balancing 负载均衡是从发起CPU的base domain开始，
 // 					   不断向上，直到顶层的sched domain。
 //					   continue_balancing是用来控制是否继续进行上层sched domain的均衡
 // 返回值：本次负载均衡迁移的任务总数
+/*
+基本流程：
+假设this_cpu=1; 
+0.先在mc sd：{[1],[2],[3],[0]}中均衡，
+1.找最buesiest的sg(find_busiest_group): 
+	2.1 local_group=[1],假设计算出busiest_group=[3]
+	2.2.计算mc sd中不均衡值(calculate_imbalance)放入env->imbalance
+2.busiest group中找busiest的cpu(find_busiest_queue):
+	由于是MC，只有一个cpu，busiest->cpu=3
+3. 从busiest->cpu==3 detach一些tasks，使env->imbalance降低为0，attach到this_cpu==1
+===> 是否继续在die均衡由continue_balancing(should_we_balance)决定，默认为1
+0.在die sd：{[0,1,2,3],[4,5,6,7]}中均衡，
+1.找最buesiest的sg(find_busiest_group): 
+	2.1 local_group=[0,1,2,3],假设计算出busiest_group=[4,5,6,7]
+	2.2.计算die sd中不均衡值(calculate_imbalance)放入env->imbalance
+2.busiest group中找busiest的cpu(find_busiest_queue):
+	假设是busiest->cpu=6
+3. 从busiest->cpu==6 detach一些tasks，使env->imbalance降低为0，attach到this_cpu==1
+*/
 static int load_balance(int this_cpu, struct rq *this_rq,
 			struct sched_domain *sd, enum cpu_idle_type idle,
 			int *continue_balancing)
@@ -10594,14 +10653,14 @@ redo:
 		goto out_balanced;
 	}
 
-	// sd下找最busy的group
+	// 1. sd下找最busy的group
 	group = find_busiest_group(&env);
 	if (!group) {
 		schedstat_inc(sd->lb_nobusyg[idle]);
 		goto out_balanced;
 	}
 
-	// group中找最busy的cpu
+	// 2. group中找最busy的cpu
 	busiest = find_busiest_queue(&env, group);
 	if (!busiest) {
 		schedstat_inc(sd->lb_nobusyq[idle]);
@@ -10634,13 +10693,15 @@ more_balance:
 		env.src_rq_rf = &rf;
 		update_rq_clock(busiest);
 
+		// 3. tasks迁移
+
 		/*
 		 * cur_ld_moved - load moved in current iteration
 		 * ld_moved     - cumulative load moved across iterations
 		 */
 		// ld_moved记录了总共迁移的任务数量
 		// cur_ld_moved是本轮迁移的任务数
-		// detach_tasks函数用来从busiest cpu的rq中摘取适合的任务
+		// 3.1 detach_tasks函数用来从busiest cpu的rq中摘取适合的任务
 		cur_ld_moved = detach_tasks(&env);
 
 		/*
@@ -10653,7 +10714,7 @@ more_balance:
 
 		rq_unlock(busiest, &rf);
 
-		// 将detach_tasks函数摘下的任务挂入到dst rq上去
+		// 3.2 将detach_tasks函数摘下的任务挂入到dst rq上去
 		if (cur_ld_moved) {
 			attach_tasks(&env);
 			ld_moved += cur_ld_moved;
@@ -10667,6 +10728,8 @@ more_balance:
 			env.flags &= ~LBF_NEED_BREAK;
 			goto more_balance;
 		}
+
+		// 4. 特殊case处理
 
 		/*
 		 * Revisit (affine) tasks on src_cpu that couldn't be moved to
@@ -10687,9 +10750,9 @@ more_balance:
 		 * moreover subsequent load balance cycles should correct the
 		 * excess load moved.
 		 */
-		// 如果sched domain仍然未达均衡均衡状态，并且在之前的均衡过程中，
-		// 有因为affinity的原因导致任务无法迁移到dest cpu，这时候要继续在src rq上搜索任务，
-		// 迁移到备选的dest cpu，因此，这里再次发起均衡操作。
+		// 4.1 如果sched domain仍然未达均衡均衡状态，并且在之前的均衡过程中，
+		// 有因为affinity的原因导致任务无法迁移到dest cpu。
+		// 这时候要继续在src rq上搜索任务迁移到备选的dest cpu，因此，这里再次发起均衡操作。
 		// 这里的均衡上下文的dest cpu设定为备选的cpu，loop也被清零，重新开始扫描
 		if ((env.flags & LBF_DST_PINNED) && env.imbalance > 0) {
 
@@ -10712,7 +10775,7 @@ more_balance:
 		/*
 		 * We failed to reach balance because of affinity.
 		 */
-		// 本层次的sched domain因为affinity而无法达到均衡状态，
+		// 4.2 本层次的sched domain因为affinity而无法达到均衡状态，
 		// 我们需要把这个状态标记到上层sched domain的group中去，
 		// 在上层sched domain进行均衡的时候，该group会被判定为group_imbalanced，
 		// 从而有更大的机会选定为busiest group，从而解决该sched domain的均衡问题
@@ -10725,9 +10788,9 @@ more_balance:
 		}
 
 		/* All tasks on this runqueue were pinned by CPU affinity */
-		// 如果选中的busiest cpu上的任务全部都是通过affinity锁定在了该cpu上，
+		// 4.3 如果选中的busiest cpu上的任务全部都是通过affinity锁定在了该cpu上，
 		// 那么清除该cpu（为了确保下轮均衡不考虑该cpu），再次发起均衡。
-		// 这种情况下，需要重新搜索source cpu，因此跳转到redo
+		// 这种情况下，需要重新搜索src cpu，因此跳转到redo
 		if (unlikely(env.flags & LBF_ALL_PINNED)) {
 			__cpumask_clear_cpu(cpu_of(busiest), cpus);
 			/*
@@ -10747,8 +10810,8 @@ more_balance:
 		}
 	}
 
-	// source rq上的cfs任务链表已经被遍历（也可能遍历多次），
-	// 基本上对runnable 任务的扫描已经到位了，如果不行就只能考虑running task了
+	// 5. src cpu上的cfs任务链表已经被遍历（也可能遍历多次），任然没有task可迁移
+	// 不行就只能考虑迁移src cpu上running task了
 	if (!ld_moved) {
 		schedstat_inc(sd->lb_failed[idle]);
 		/*
@@ -10757,7 +10820,7 @@ more_balance:
 		 * frequent, pollute the failure counter causing
 		 * excessive cache_hot migrations and active balances.
 		 */
-		// sd nr_balance_failed失败次数，越大，balance越激进
+		// balance失败次数增加，越大，后面balance越激进
 		// 这里过滤掉new idle，因为太频繁
 		if (idle != CPU_NEWLY_IDLE)
 			sd->nr_balance_failed++;
@@ -10795,7 +10858,7 @@ more_balance:
 			raw_spin_unlock_irqrestore(&busiest->lock, flags);
 
 			if (active_balance) {
-				// busiest停止当前任务，把可迁移的任务push到this cpu
+				// 5.1 busiest停止当前任务，把可迁移的任务push到this cpu
 				stop_one_cpu_nowait(cpu_of(busiest),
 					active_load_balance_cpu_stop, busiest,
 					&busiest->active_balance_work);
@@ -11443,6 +11506,10 @@ out:
  * The function returns false if the loop has stopped before running
  * through all idle CPUs.
  */
+// 主要功能：
+// 1. 更新所有nohz idle cpus上的blocked负载(NOHZ_BALANCE_KICK|NOHZ_STATS_KICK)
+// 2. 负载均衡，给所有nohz idle cpus拉任务(NOHZ_BALANCE_KICK)
+//		为什么在负载均衡路径里更新blocked负载？因为cpu已经idle没有task活动，没有更新负载的入口了
 static bool _nohz_idle_balance(struct rq *this_rq, unsigned int flags,
 			       enum cpu_idle_type idle)
 {
@@ -11474,6 +11541,7 @@ static bool _nohz_idle_balance(struct rq *this_rq, unsigned int flags,
 	 */
 	smp_mb();
 
+	// 1. 除this cpu，对于其他nohz idle cpus，更新blocked负载，做负载均衡
 	for_each_cpu(balance_cpu, nohz.idle_cpus_mask) {
 		if (balance_cpu == this_cpu || !idle_cpu(balance_cpu))
 			continue;
@@ -11490,6 +11558,7 @@ static bool _nohz_idle_balance(struct rq *this_rq, unsigned int flags,
 
 		rq = cpu_rq(balance_cpu);
 
+		// 1.1 更新cpu的blocked负载
 		has_blocked_load |= update_nohz_stats(rq, true);
 
 		/*
@@ -11503,6 +11572,7 @@ static bool _nohz_idle_balance(struct rq *this_rq, unsigned int flags,
 			update_rq_clock(rq);
 			rq_unlock_irqrestore(rq, &rf);
 
+			// 1.2 负载均衡，拉任务到nohz idle cpu，让它干活
 			if (flags & NOHZ_BALANCE_KICK)
 				rebalance_domains(rq, CPU_IDLE);
 		}
@@ -11522,11 +11592,13 @@ static bool _nohz_idle_balance(struct rq *this_rq, unsigned int flags,
 		nohz.next_balance = next_balance;
 
 	/* Newly idle CPU doesn't need an update */
+	// 2. 更新this cpu的blocked负载，newly idle不需要，因为在执行
 	if (idle != CPU_NEWLY_IDLE) {
 		update_blocked_averages(this_cpu);
 		has_blocked_load |= this_rq->has_blocked_load;
 	}
 
+	// 3. this cpu做负载均衡
 	if (flags & NOHZ_BALANCE_KICK)
 		rebalance_domains(this_rq, CPU_IDLE);
 
@@ -11592,6 +11664,7 @@ static void nohz_newidle_balance(struct rq *this_rq)
 	 * candidate for ilb instead of waking up another idle CPU.
 	 * Kick an normal ilb if we failed to do the update.
 	 */
+	// 更新nohz idle cpus的blocked负载，如果不成功，则唤醒一个nohz idle cpu去更新
 	if (!_nohz_idle_balance(this_rq, NOHZ_STATS_KICK, CPU_NEWLY_IDLE))
 		kick_ilb(NOHZ_STATS_KICK);
 	raw_spin_lock(&this_rq->lock);
@@ -11651,6 +11724,8 @@ static int newidle_balance(struct rq *this_rq, struct rq_flags *rf)
 	 */
 	rq_unpin_lock(this_rq, rf);
 
+	// avg_idle时间大于迁移消耗时间 || 所在rd没有overload
+	// 1. 不做load balance，但是要干一个活：更新所有idle cpus上的blocked负载
 	if (this_rq->avg_idle < sysctl_sched_migration_cost ||
 	    !READ_ONCE(this_rq->rd->overload)) {
 
@@ -11667,8 +11742,10 @@ static int newidle_balance(struct rq *this_rq, struct rq_flags *rf)
 
 	raw_spin_unlock(&this_rq->lock);
 
+	// 更新blocked负载
 	update_blocked_averages(this_cpu);
 	rcu_read_lock();
+	// 从this cpu的MC->DIE做负载均衡
 	for_each_domain(this_cpu, sd) {
 		int continue_balancing = 1;
 		u64 t0, domain_cost;
