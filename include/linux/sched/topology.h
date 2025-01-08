@@ -89,9 +89,12 @@ struct sched_domain {
 	// 调度组
 	struct sched_group *groups;	/* the balancing groups of the domain */
 	// 定义检查该sched domain均衡状态的时间间隔范围
+	// 默认为sd内cpu个数ms，如MC sd={[0],[1],[2],[3]}, min_interval=4ms
 	unsigned long min_interval;	/* Minimum balance interval ms */
+	// 默认为sd内cpu个数*2ms, max_interval=8ms
 	unsigned long max_interval;	/* Maximum balance interval ms */
 	// 如果cpu繁忙，那么均衡要时间间隔长一些，即时间间隔定义为busy_factor * balance_interval
+	// busy_factor默认=32
 	unsigned int busy_factor;	/* less balancing by factor if busy */
 	// 定义判定不均衡的水位线
 	unsigned int imbalance_pct;	/* No balance until over watermark */
@@ -109,6 +112,7 @@ struct sched_domain {
 	// 上次进行balance的时间点
 	unsigned long last_balance;	/* init to jiffies. units in jiffies */
 	// 该sched domain均衡的基础时间间隔
+	// 在min_interval~max_interval, sd包含cpu越多，值越大
 	unsigned int balance_interval;	/* initialise to 1. units in ms. */
 	// 本sched domain中进行负载均衡失败的次数。
 	// 当失败次数大于cache_nice_tries的时候，我们考虑迁移cache hot的任务，进行更激进的均衡操作

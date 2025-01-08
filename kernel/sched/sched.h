@@ -822,6 +822,10 @@ struct root_domain {
 	 * - More than one runnable task
 	 * - Running task is misfit
 	 */
+	// 只要有一个cpu over load，即判定为rd overload
+	// overload指标：
+	// a) 大于1个runnable task，即该CPU上有等待执行的任务
+	// b) 只有一个正在运行的任务，但是是misfit task
 	int			overload;
 
 	/* Indicate one or more cpus over-utilized (tipping point) */
@@ -1051,10 +1055,21 @@ struct rq {
 #ifdef CONFIG_SCHED_THERMAL_PRESSURE
 	struct sched_avg	avg_thermal;
 #endif
+	// 记录CPU进入idle状态的时间点，用于计算avg_idle。在该CPU执行任务期间，该值等于0
 	u64			idle_stamp;
+	// 记录CPU的平均idle时间
+	/*
+	首先在newidle_balance的时候记录idle_stamp，
+	第一调用ttwu_do_wakeup的时候会计算这之间的时间，得到本次的CPU处于idle状态的时间，
+	然后通过下面的公式计算平均idle time：
+		当前的avg_idle = 上次avg_idle + （本次idle time - 上次avg_idle）/8
+	为了防止CPU一次idle太久时间带来的影响，我们限制了avg_idle的最大值，
+	即计算出来avg_idle的值不能大于2倍的max_idle_balance_cost值。
+	*/
 	u64			avg_idle;
 
 	/* This is used to determine avg_idle's max value */
+	// 该CPU进行new idle balance的最大开销。
 	u64			max_idle_balance_cost;
 #endif /* CONFIG_SMP */
 
