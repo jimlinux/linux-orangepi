@@ -117,6 +117,7 @@ int __weak arch_asym_cpu_priority(int cpu)
  *
  * (default: ~20%)
  */
+// cap达到max的80%以上
 #define fits_capacity(cap, max)	((cap) * 1280 < (max) * 1024)
 
 #endif
@@ -5768,6 +5769,7 @@ static inline void hrtick_update(struct rq *rq)
 #ifdef CONFIG_SMP
 static inline unsigned long cpu_util(int cpu);
 
+// True: cpu利用率已经达到cpu算力的80%
 static inline bool cpu_overutilized(int cpu)
 {
 	int overutilized = -1;
@@ -8112,7 +8114,7 @@ enum fbq_type { regular, remote, all };
  * first so the group_type can simply be compared when selecting the busiest
  * group. See update_sd_pick_busiest().
  */
-// group繁忙状态，由 group_classify 设置
+// group繁忙状态，由 group_classify 判定，由 update_sd_pick_busiest 做两者比较
 enum group_type {
 	/* The group has spare capacity that can be used to run more tasks.  */
 	group_has_spare = 0,
@@ -8915,7 +8917,8 @@ static void update_blocked_averages(int cpu)
 // 在负载均衡的时候，通过sg_lb_stats数据结构来表示sched group的负载统计信息
 struct sg_lb_stats {
 	// 该sched group上每个CPU的平均负载。
-	// 仅在sched group处于group_overloaded状态下才计算该值，方便计算迁移负载量
+	// 仅在sched group处于group_overloaded状态下才计算该值，
+	// 通过sched group平均负载可以识别更繁忙的group, 方便计算迁移负载量
 	// sgs->avg_load = (sgs->group_load * SCHED_CAPACITY_SCALE) / sgs->group_capacity;
 	unsigned long avg_load; /*Avg load across the CPUs of the group */
 	// 该sched group上所有CPU的负载(avg.load_avg)之和
@@ -8991,6 +8994,7 @@ static inline void init_sd_lb_stats(struct sd_lb_stats *sds)
 	};
 }
 
+// 去除rt/dl/thermal/irq后的剩余算力
 static unsigned long scale_rt_capacity(int cpu)
 {
 	struct rq *rq = cpu_rq(cpu);
@@ -9158,7 +9162,7 @@ static inline int check_misfit_status(struct rq *rq, struct sched_domain *sd)
  * group imbalance and decide the groups need to be balanced again. A most
  * subtle and fragile situation.
  */
-
+// 在load_balance时，上层group由下层group设置
 static inline int sg_imbalanced(struct sched_group *group)
 {
 	return group->sgc->imbalance;
@@ -9177,10 +9181,11 @@ static inline int sg_imbalanced(struct sched_group *group)
  * any benefit for the load balance.
  */
 /*
-该group还有空闲算力，可以承载其他group的任务。当sched group满足下面条件之一就处于这种状态：
-1、group中总任务量小于group的cpu个数，即至少有一个cpu处于idle状态。
-2、group总算力可以承载当前的group中的任务量
-注意：这里的“任务量”需要考虑group util和group runnable load
+该group还有空闲算力，可以承载其他group的任务。
+满足下面条件之一：
+1、group中总taks数<group总cpu数;
+2、group总runnable_avg <= group总算力*imbalance_pct 且
+		group总uitl_avg*imbalance_pct < group总算力
 */
 static inline bool
 group_has_capacity(unsigned int imbalance_pct, struct sg_lb_stats *sgs)
@@ -9208,10 +9213,11 @@ group_has_capacity(unsigned int imbalance_pct, struct sg_lb_stats *sgs)
  *  false.
  */
 /*
-这个状态说明该group已经过载，无法为其他任务提供算力。Overloaded的Sched group需要同时满足下面的条件：
-1、group上总的任务数（不仅仅是cfs任务）大于group中cpu的个数，即至少有一个任务处于runnable状态。
-2、Group上总的util或者runnalbe load大于group上cpu总算力。当然，判断过载需要考虑margin，
-   不能等到util/runnable大于capacity才处理。具体margin和sched domain的imbalance_pct参数相关）
+这个状态说明该group已经过载，无法为其他任务提供算力。
+Overloaded判定满足下面条件：
+1、group内tasks数>group内cpu数;
+2、group总util_avg*imbalance_pct > group内总算力 或者
+	group总runnable_avg > group内总算力*imbalance_pct
 */
 static inline bool
 group_is_overloaded(unsigned int imbalance_pct, struct sg_lb_stats *sgs)
@@ -9244,6 +9250,7 @@ group_smaller_min_cpu_capacity(struct sched_group *sg, struct sched_group *ref)
  * group_smaller_max_cpu_capacity: Returns true if sched_group sg has smaller
  * per-CPU capacity_orig than sched_group ref.
  */
+// True: @sg中per-cpu的算大算力<ref
 static inline bool
 group_smaller_max_cpu_capacity(struct sched_group *sg, struct sched_group *ref)
 {
@@ -9305,6 +9312,7 @@ static bool update_nohz_stats(struct rq *rq, bool force)
  * @sgs: variable to hold the statistics for this group.
  * @sg_status: Holds flag indicating the status of the sched_group
  */
+// 统计调度组@group的各种负载，记录到@sgs
 static inline void update_sg_lb_stats(struct lb_env *env,
 				      struct sched_group *group,
 				      struct sg_lb_stats *sgs,
@@ -9316,13 +9324,14 @@ static inline void update_sg_lb_stats(struct lb_env *env,
 
 	local_group = cpumask_test_cpu(env->dst_cpu, sched_group_span(group));
 
+	// 0. 遍历group内cpus
 	for_each_cpu_and(i, sched_group_span(group), env->cpus) {
 		struct rq *rq = cpu_rq(i);
 
 		if ((env->flags & LBF_NOHZ_STATS) && update_nohz_stats(rq, false))
 			env->flags |= LBF_NOHZ_AGAIN;
 
-		// 统计sched group内cpu，3种load总量，task总数
+		// 1. 统计sched group内cpu，3种load总量，task总数
 		sgs->group_load += cpu_load(rq);
 		sgs->group_util += cpu_util(i);
 		sgs->group_runnable += cpu_runnable(rq);
@@ -9331,11 +9340,13 @@ static inline void update_sg_lb_stats(struct lb_env *env,
 		nr_running = rq->nr_running;
 		sgs->sum_nr_running += nr_running;
 
-		// 只要该sched group上有一个CPU上有1个以上的任务，那么就标记该sched group为overload状态
+		// 2. 判定group状态sg_status
+
+		// 2.1 只要该sched group上有一个CPU上有1个以上的任务，那么就标记该sched group为overload状态
 		if (nr_running > 1)
 			*sg_status |= SG_OVERLOAD;
 
-		// 只要该sched group上有一个CPU处于overutilized（该cpu利用率已经达到cpu算力的80%），
+		// 2.2 只要该sched group上有一个CPU处于overutilized（该cpu利用率已经达到cpu算力的80%），
 		// 那么就标记该sched group为overutilized状态。
 		if (cpu_overutilized(i))
 			*sg_status |= SG_OVERUTILIZED;
@@ -9347,7 +9358,7 @@ static inline void update_sg_lb_stats(struct lb_env *env,
 		/*
 		 * No need to call idle_cpu() if nr_running is not 0
 		 */
-		// 统计sg内idle cpu个数
+		// 3. 统计sg内idle cpu个数
 		if (!nr_running && idle_cpu(i)) {
 			sgs->idle_cpus++;
 			/* Idle cpu can't have misfit task */
@@ -9358,7 +9369,7 @@ static inline void update_sg_lb_stats(struct lb_env *env,
 			continue;
 
 		/* Check for a misfit task on the cpu */
-		// group内cpu只要有一个有misfit task，那么标记group是over load
+		// 4. 统计group内最大group_misfit_task_load，标记group是over load
 		if (env->sd->flags & SD_ASYM_CPUCAPACITY &&
 		    sgs->group_misfit_task_load < rq->misfit_task_load) {
 			sgs->group_misfit_task_load = rq->misfit_task_load;
@@ -9374,17 +9385,17 @@ static inline void update_sg_lb_stats(struct lb_env *env,
 		sgs->group_asym_packing = 1;
 	}
 
-	// 更新sched group的总算力和cpu个数。这里的capacity是指cpu可以用于cfs任务的算力
+	// 5. 更新sched group的总算力。这里的capacity是指cpu可以用于cfs任务的算力
 	sgs->group_capacity = group->sgc->capacity;
 
+	// 6. 统计group内cpu个数
 	sgs->group_weight = group->group_weight;
 
-	// 判定sched group当前的负载状态
+	// 7. 判定sched group当前的负载状态
 	sgs->group_type = group_classify(env->sd->imbalance_pct, group, sgs);
 
 	/* Computing avg_load makes sense only when group is overloaded */
-	// 计算sched group平均负载（仅在group overloaded状态才计算）。
-	// 在overload的情况下，通过sched group平均负载可以识别更繁忙的group
+	// 8. 计算sched group平均负载（仅在group overloaded状态才计算）。
 	if (sgs->group_type == group_overloaded)
 		sgs->avg_load = (sgs->group_load * SCHED_CAPACITY_SCALE) /
 				sgs->group_capacity;
@@ -9403,8 +9414,8 @@ static inline void update_sg_lb_stats(struct lb_env *env,
  * Return: %true if @sg is a busier group than the previously selected
  * busiest group. %false otherwise.
  */
-// 判断当前@sg，是否比目前选出的busiest group更忙
-// 返回值：@sg比目前busiest group更忙，返回true
+// 判断当前@sg，是否比当前的busiest group更忙
+// 返回值：@sg比当前busiest group更忙，返回true
 static bool update_sd_pick_busiest(struct lb_env *env,
 				   struct sd_lb_stats *sds,
 				   struct sched_group *sg,
@@ -9422,11 +9433,14 @@ static bool update_sd_pick_busiest(struct lb_env *env,
 	 * CPUs in the group should either be possible to resolve
 	 * internally or be covered by avg_load imbalance (eventually).
 	 */
+	// 1. 特殊case：当前group有misfit task，
+	// 判断sds->local算力<=当前group，不做无用功
 	if (sgs->group_type == group_misfit_task &&
 	    (!group_smaller_max_cpu_capacity(sg, sds->local) ||
 	     sds->local_stat.group_type != group_has_spare))
 		return false;
 
+	// 2. 判断繁忙程度
 	if (sgs->group_type > busiest->group_type)
 		return true;
 
@@ -9441,6 +9455,7 @@ static bool update_sd_pick_busiest(struct lb_env *env,
 	switch (sgs->group_type) {
 	case group_overloaded:
 		/* Select the overloaded group with highest avg_load. */
+		// 3. 都overloaded，判断group的平均负载
 		if (sgs->avg_load <= busiest->avg_load)
 			return false;
 		break;
@@ -9450,6 +9465,7 @@ static bool update_sd_pick_busiest(struct lb_env *env,
 		 * Select the 1st imbalanced group as we don't have any way to
 		 * choose one more than another.
 		 */
+		// 4. 都有亲和性问题，还是保持现状
 		return false;
 
 	case group_asym_packing:
@@ -9463,6 +9479,7 @@ static bool update_sd_pick_busiest(struct lb_env *env,
 		 * If we have more than one misfit sg go with the biggest
 		 * misfit.
 		 */
+		// 5. 选group_misfit_task_load大的group
 		if (sgs->group_misfit_task_load < busiest->group_misfit_task_load)
 			return false;
 		break;
@@ -9478,6 +9495,7 @@ static bool update_sd_pick_busiest(struct lb_env *env,
 		 * XXX for now avg_load is not computed and always 0 so we
 		 * select the 1st one.
 		 */
+		// 6. 都是busy，还是判断group的平均负载
 		if (sgs->avg_load <= busiest->avg_load)
 			return false;
 		break;
@@ -9490,9 +9508,12 @@ static bool update_sd_pick_busiest(struct lb_env *env,
 		 * that the group has less spare capacity but finally more idle
 		 * CPUs which means less opportunity to pull tasks.
 		 */
+		// 7. 有空闲算力
+		// 7.1 谁的idle cpu数少，谁是busiest
 		if (sgs->idle_cpus > busiest->idle_cpus)
 			return false;
 		else if ((sgs->idle_cpus == busiest->idle_cpus) &&
+			// 7.2 谁运行的tasks多谁是busiest
 			 (sgs->sum_nr_running <= busiest->sum_nr_running))
 			return false;
 
@@ -9505,6 +9526,8 @@ static bool update_sd_pick_busiest(struct lb_env *env,
 	 * throughput. Maximize throughput, power/energy consequences are not
 	 * considered.
 	 */
+	// 8. 特殊case处理，sds->local=[0,1,2,3], sg=[4,5,6,7]
+	// 当前sg压力不算大，不要向小核上迁移，避免影响throughput
 	if ((env->sd->flags & SD_ASYM_CPUCAPACITY) &&
 	    (sgs->group_type <= group_fully_busy) &&
 	    (group_smaller_min_cpu_capacity(sds->local, sg)))
@@ -9886,7 +9909,7 @@ find_idlest_group(struct sched_domain *sd, struct task_struct *p, int this_cpu)
  * @env: The load balancing environment.
  * @sds: variable to hold the statistics for this sched_domain.
  */
-// 主要功能：更新该sched domain上各个sched group的负载和算力，
+// 主要功能：更新该sched domain和各个sched group的负载和算力，
 //			得到local group以及非local group中busiest group的负载信息
 static inline void update_sd_lb_stats(struct lb_env *env, struct sd_lb_stats *sds)
 {
@@ -9901,11 +9924,15 @@ static inline void update_sd_lb_stats(struct lb_env *env, struct sd_lb_stats *sd
 		env->flags |= LBF_NOHZ_STATS;
 #endif
 
-	// sd内遍历sg
+	// 0. sd内遍历sg, 假设dst_cpu=1
+	// MC: sd={[1],[2],[3],[0]}
+	// DIE: sd={[0,1,2,3], [4,5,6,7]}
 	do {
 		struct sg_lb_stats *sgs = &tmp_sgs;
 		int local_group;
-		// dst_cpu所在的group
+		// 2. 确定dst_cpu所在的group为local group
+		// MC上：local group = [1]
+		// DIE上：local group = [0,1,2,3]
 		local_group = cpumask_test_cpu(env->dst_cpu, sched_group_span(sg));
 		if (local_group) {
 			sds->local = sg;
@@ -9917,14 +9944,14 @@ static inline void update_sd_lb_stats(struct lb_env *env, struct sd_lb_stats *sd
 				update_group_capacity(env->sd, env->dst_cpu);
 		}
 
-		// 更新该sched group的负载统计
+		// 3. 更新该sched group的负载统计
 		update_sg_lb_stats(env, sg, sgs, &sg_status);
 
 		// local group跳过
 		if (local_group)
 			goto next_group;
 
-		// 找到non local group中的最忙的那个group
+		// 4. 找到non local group中的最忙的那个group
 		if (update_sd_pick_busiest(env, sds, sg, sgs)) {
 			sds->busiest = sg;
 			sds->busiest_stat = *sgs;
@@ -9932,7 +9959,7 @@ static inline void update_sd_lb_stats(struct lb_env *env, struct sd_lb_stats *sd
 
 next_group:
 		/* Now, start updating sd_lb_stats */
-		// 更新sched domain上各个sched group总的负载和算力
+		// 5. 更新sched domain上各个sched group总的负载和算力
 		sds->total_load += sgs->group_load;
 		sds->total_capacity += sgs->group_capacity;
 
@@ -9954,7 +9981,7 @@ next_group:
 	if (env->sd->flags & SD_NUMA)
 		env->fbq_type = fbq_classify_group(&sds->busiest_stat);
 
-	// 更新root domain的overload和overutil状态。
+	// 6. 更新root domain的overload和overutil状态。
 	// 对于顶层的sched domain，我们需要把各个sched group的overload和overutil状态体现到root domain中
 	if (!env->sd->parent) {
 		struct root_domain *rd = env->dst_rq->rd;
@@ -10051,7 +10078,7 @@ static inline void calculate_imbalance(struct lb_env *env, struct sd_lb_stats *s
 			 * amount of load to migrate in order to balance the
 			 * system.
 			 */
-			// 使用util来均衡
+			// 3.1.1 使用util来均衡
 			env->migration_type = migrate_util;
 			env->imbalance = max(local->group_capacity, local->group_util) -
 					 local->group_util;
@@ -10063,7 +10090,7 @@ static inline void calculate_imbalance(struct lb_env *env, struct sd_lb_stats *s
 			 * waiting task in this overloaded busiest group. Let's
 			 * try to pull it.
 			 */
-			// 处理特殊case，this_cpu是idle的，但是由于处理均衡导致util高，
+			// 3.1.2 处理特殊case，this_cpu是idle的，但是由于处理均衡导致util高，
 			// 上面公式算出来env->imbalance == 0，这种case设为migrate_task
 			if (env->idle != CPU_NOT_IDLE && env->imbalance == 0) {
 				env->migration_type = migrate_task;
@@ -10074,8 +10101,8 @@ static inline void calculate_imbalance(struct lb_env *env, struct sd_lb_stats *s
 		}
 
 		// 3.2 busiest有剩余算力，或者MC sd：
+		// 3.2.1 busiest group只有一个1cpu，local和busiest均分tasks
 		if (busiest->group_weight == 1 || sds->prefer_sibling) {
-			// 3.2.1 group只有一个1cpu，local和busiest均分
 			unsigned int nr_diff = busiest->sum_nr_running;
 			/*
 			 * When prefer sibling, evenly spread running tasks on
@@ -10090,7 +10117,7 @@ static inline void calculate_imbalance(struct lb_env *env, struct sd_lb_stats *s
 			 * If there is no overload, we just want to even the number of
 			 * idle cpus.
 			 */
-			// 3.2.2 group多个cpu，local和busiest group中idle cpu相等
+			// 3.2.2 group多个cpu，均衡local和busiest group中idle cpu数
 			env->migration_type = migrate_task;
 			env->imbalance = max_t(long, 0, (local->idle_cpus -
 						 busiest->idle_cpus) >> 1);
@@ -10108,7 +10135,7 @@ static inline void calculate_imbalance(struct lb_env *env, struct sd_lb_stats *s
 	 * Local is fully busy but has to take more load to relieve the
 	 * busiest group
 	 */
-	// 4. local group繁忙程度介于[group_fully_busy, group_imbalanced]
+	// 4. local group繁忙程度在[group_fully_busy, group_imbalanced]
 	if (local->group_type < group_overloaded) {
 		/*
 		 * Local will become overloaded so the avg_load metrics are
@@ -10125,7 +10152,7 @@ static inline void calculate_imbalance(struct lb_env *env, struct sd_lb_stats *s
 		 * If the local group is more loaded than the selected
 		 * busiest group don't try to pull any tasks.
 		 */
-		// 4.1 local sg负载比busiest还重，不均衡
+		// 4.1 local sg平均负载比busiest还重，不需要均衡
 		if (local->avg_load >= busiest->avg_load) {
 			env->imbalance = 0;
 			return;
@@ -10140,7 +10167,7 @@ static inline void calculate_imbalance(struct lb_env *env, struct sd_lb_stats *s
 	 * reduce the group load below the group capacity. Thus we look for
 	 * the minimum possible imbalance.
 	 */
-	// 5. local sg繁忙 == group_overloaded，迁移负载，使其更靠近负载均值
+	// 5. local和busiest都group_overloaded，迁移load，使其更靠近负载均值
 	env->migration_type = migrate_load;
 	env->imbalance = min(
 		(busiest->avg_load - sds->avg_load) * busiest->group_capacity,
@@ -10188,6 +10215,8 @@ static inline void calculate_imbalance(struct lb_env *env, struct sd_lb_stats *s
  *
  * Return:	- The busiest group if imbalance exists.
  */
+// 统计调度域和其下各个调度组的负载数据，找到dst cpu所在local group和最忙busiest group
+// 通过两者判定是否需要均衡，如果需要，计算不均衡值
 static struct sched_group *find_busiest_group(struct lb_env *env)
 {
 	struct sg_lb_stats *local, *busiest;
@@ -10199,10 +10228,10 @@ static struct sched_group *find_busiest_group(struct lb_env *env)
 	 * Compute the various statistics relevant for load balancing at
 	 * this level.
 	 */
-	// update sd domain负载
+	// 1. 统计sd和其内各groups负载数据，找到local_group和非local的busiest group
 	update_sd_lb_stats(env, &sds);
 
-	// 系统为进入overutilized，EAS work，不进行负载均衡
+	// 2. 系统没到overutilized，EAS work，不进行负载均衡
 	if (sched_energy_enabled()) {
 		struct root_domain *rd = env->dst_rq->rd;
 		int out_balance = 1;
@@ -10217,13 +10246,15 @@ static struct sched_group *find_busiest_group(struct lb_env *env)
 	local = &sds.local_stat;
 	busiest = &sds.busiest_stat;
 
+	// 3. 判断是否均衡
+
 	/* There is no busy sibling group to pull tasks from */
-	// 没有找到最忙的那个group，不需要均衡
+	// 3.1 没有找到最忙的那个group，不需要均衡
 	if (!sds.busiest)
 		goto out_balanced;
 
 	/* Misfit tasks should be dealt with regardless of the avg load */
-	// Busiest group中有misfit task，那么必须要进行均衡，把misfit task拉取到local group中
+	// 3.2 Busiest group中有misfit task，那么必须要进行均衡，把misfit task拉取到local group中
 	if (busiest->group_type == group_misfit_task)
 		goto force_balance;
 
@@ -10236,7 +10267,7 @@ static struct sched_group *find_busiest_group(struct lb_env *env)
 	 * work because they assume all things are equal, which typically
 	 * isn't true due to cpus_ptr constraints and the like.
 	 */
-	// Busiest group是一个由于cpu affinity导致的不均衡，
+	// 3.3 Busiest group是一个由于cpu affinity导致的不均衡，
 	// 这个不均衡在底层(如MC)sched domain无法处理，需要在本层（如DIE）domain进行均衡
 	if (busiest->group_type == group_imbalanced)
 		goto force_balance;
@@ -10245,7 +10276,7 @@ static struct sched_group *find_busiest_group(struct lb_env *env)
 	 * If the local group is busier than the selected busiest group
 	 * don't try and pull any tasks.
 	 */
-	// local group比busiest group还要忙，不均衡
+	// 3.4 local group比busiest group还要忙，不均衡
 	if (local->group_type > busiest->group_type)
 		goto out_balanced;
 
@@ -10253,13 +10284,13 @@ static struct sched_group *find_busiest_group(struct lb_env *env)
 	 * When groups are overloaded, use the avg_load to ensure fairness
 	 * between tasks.
 	 */
-	// local group和busiest group都忙
+	// 3.5 local group和busiest group都忙
 	if (local->group_type == group_overloaded) {
 		/*
 		 * If the local group is more loaded than the selected
 		 * busiest group don't try to pull any tasks.
 		 */
-		// local group的平均负载比busiest group高，不均衡
+		// 3.5.1 local group的平均负载比busiest group高，不均衡
 		if (local->avg_load >= busiest->avg_load)
 			goto out_balanced;
 
@@ -10271,7 +10302,7 @@ static struct sched_group *find_busiest_group(struct lb_env *env)
 		 * Don't pull any tasks if this group is already above the
 		 * domain average load.
 		 */
-		// local group的平均负载高于sched domain的平均负载，不均衡
+		// 3.5.2 local group的平均负载高于sched domain的平均负载，不均衡
 		if (local->avg_load >= sds.avg_load)
 			goto out_balanced;
 
@@ -10279,7 +10310,7 @@ static struct sched_group *find_busiest_group(struct lb_env *env)
 		 * If the busiest group is more loaded, use imbalance_pct to be
 		 * conservative.
 		 */
-		// 虽然busiest group的平均负载高于local group，但是高的不多，
+		// 3.5.3 虽然busiest group的平均负载高于local group，但是高的不多，
 		// 那也不需要进行均衡，毕竟均衡需要额外的开销。
 		// 具体的门限是有sched domain的imbalance_pct确定
 		if (100 * busiest->avg_load <=
@@ -10291,11 +10322,11 @@ static struct sched_group *find_busiest_group(struct lb_env *env)
 	if (sds.prefer_sibling && local->group_type == group_has_spare &&
 	    busiest->sum_nr_running > local->sum_nr_running + 1)
 		goto force_balance;
-	// busiest group没有overload的场景，
+	// 3.6 busiest group没有overload，压力不大
 	// 这时候说明该sched domain中其他的group的算力都是cover当前的任务负载，
 	// 是否要进行均衡，主要看idle cpu的情况
 	if (busiest->group_type != group_overloaded) {
-		// 本CPU不是idle cpu，那么判断sched domain处于均衡状态, 不均衡
+		// 3.6.1 本CPU不是idle cpu，不均衡
 		if (env->idle == CPU_NOT_IDLE)
 			/*
 			 * If the busiest group is not overloaded (and as a
@@ -10304,7 +10335,7 @@ static struct sched_group *find_busiest_group(struct lb_env *env)
 			 */
 			goto out_balanced;
 
-		// 如果busiest group中有更多的idle CPU，不均衡
+		// 3.6.2 如果busiest group中有更多的idle CPU，不均衡
 		if (busiest->group_weight > 1 &&
 		    local->idle_cpus <= (busiest->idle_cpus + 1))
 			/*
@@ -10317,7 +10348,7 @@ static struct sched_group *find_busiest_group(struct lb_env *env)
 			 * there is more than 1 CPU per group.
 			 */
 			goto out_balanced;
-		// busiest group中只有一个cfs任务，不均衡
+		// 3.6.3 busiest group中只有一个cfs任务，不均衡
 		if (busiest->sum_h_nr_running == 1)
 			/*
 			 * busiest doesn't have any tasks waiting to run
@@ -10327,6 +10358,7 @@ static struct sched_group *find_busiest_group(struct lb_env *env)
 
 force_balance:
 	/* Looks like there is an imbalance. Compute it */
+	// 4. 对于需要均衡的情况，计算不均衡值env->imbalance
 	calculate_imbalance(env, &sds);
 	return env->imbalance ? sds.busiest : NULL;
 
@@ -10750,8 +10782,8 @@ more_balance:
 		 * moreover subsequent load balance cycles should correct the
 		 * excess load moved.
 		 */
-		// 4.1 如果sched domain仍然未达均衡均衡状态，并且在之前的均衡过程中，
-		// 有因为affinity的原因导致任务无法迁移到dest cpu。
+		// 4.1 经过上面迁移，sd仍然未均衡，
+		// LBF_DST_PINNED表示之前迁移中有task因为affinity没有被迁到dst cpu。
 		// 这时候要继续在src rq上搜索任务迁移到备选的dest cpu，因此，这里再次发起均衡操作。
 		// 这里的均衡上下文的dest cpu设定为备选的cpu，loop也被清零，重新开始扫描
 		if ((env.flags & LBF_DST_PINNED) && env.imbalance > 0) {
@@ -10775,7 +10807,7 @@ more_balance:
 		/*
 		 * We failed to reach balance because of affinity.
 		 */
-		// 4.2 本层次的sched domain因为affinity而无法达到均衡状态，
+		// 4.2 LBF_SOME_PINNED表示有些task因为affiniety无法迁移，
 		// 我们需要把这个状态标记到上层sched domain的group中去，
 		// 在上层sched domain进行均衡的时候，该group会被判定为group_imbalanced，
 		// 从而有更大的机会选定为busiest group，从而解决该sched domain的均衡问题
@@ -10820,12 +10852,12 @@ more_balance:
 		 * frequent, pollute the failure counter causing
 		 * excessive cache_hot migrations and active balances.
 		 */
-		// balance失败次数增加，越大，后面balance越激进
+		// 5.1 balance失败次数增加，越大，后面balance越激进
 		// 这里过滤掉new idle，因为太频繁
 		if (idle != CPU_NEWLY_IDLE)
 			sd->nr_balance_failed++;
 
-		// nr_balance_failed太多，进行active balance
+		// 5.2 nr_balance_failed太多，进行active balance
 		if (need_active_balance(&env)) {
 			unsigned long flags;
 
@@ -10836,7 +10868,7 @@ more_balance:
 			 * if the curr task on busiest CPU can't be
 			 * moved to this_cpu:
 			 */
-			// busiest->curr是否亲和this_cpu（这里this cpu即是dst cpu）
+			// 5.2.1 busiest->curr是否亲和this_cpu（这里this cpu即是dst cpu）
 			if (!cpumask_test_cpu(this_cpu, busiest->curr->cpus_ptr)) {
 				raw_spin_unlock_irqrestore(&busiest->lock,
 							    flags);
@@ -10849,7 +10881,7 @@ more_balance:
 			 * ->active_balance_work.  Once set, it's cleared
 			 * only after active load balance is finished.
 			 */
-			// 设置标记，准备开始active balance
+			// 5.2.2 设置标记，准备开始active balance
 			if (!busiest->active_balance) {
 				busiest->active_balance = 1;
 				busiest->push_cpu = this_cpu;
@@ -10858,7 +10890,7 @@ more_balance:
 			raw_spin_unlock_irqrestore(&busiest->lock, flags);
 
 			if (active_balance) {
-				// 5.1 busiest停止当前任务，把可迁移的任务push到this cpu
+				// 5.2.3 busiest停止当前任务，把可迁移的任务push到this cpu
 				stop_one_cpu_nowait(cpu_of(busiest),
 					active_load_balance_cpu_stop, busiest,
 					&busiest->active_balance_work);
@@ -10975,7 +11007,7 @@ update_next_balance(struct sched_domain *sd, unsigned long *next_balance)
  * least 1 task to be running on each physical CPU where possible, and
  * avoids physical / logical imbalances.
  */
-// 主要功能：在busiest_cpu上找一个可迁移的task detach，attach到target_cpu
+// 功能：这里执行者是busiest cpu上的stopper kthread，把1个task push到target cpu
 static int active_load_balance_cpu_stop(void *data)
 {
 	struct rq *busiest_rq = data;
@@ -11039,6 +11071,7 @@ static int active_load_balance_cpu_stop(void *data)
 		schedstat_inc(sd->alb_count);
 		update_rq_clock(busiest_rq);
 
+		// 1. 在busiest_rq->cpu detach一个task
 		p = detach_one_task(&env);
 		if (p) {
 			schedstat_inc(sd->alb_pushed);
@@ -11053,6 +11086,7 @@ out_unlock:
 	busiest_rq->active_balance = 0;
 	rq_unlock(busiest_rq, &rf);
 
+	// 2. 把这个task attach到target cpu
 	if (p)
 		attach_one_task(target_rq, p);
 

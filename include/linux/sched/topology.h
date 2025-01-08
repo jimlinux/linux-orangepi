@@ -270,6 +270,7 @@ static inline bool cpus_share_cache(int this_cpu, int that_cpu)
  *      ----------------------------- * SCHED_CAPACITY_SCALE
  *      max(max_perf(c) : c \in CPUs)
  */
+// =  @cpu的最大频率/系统最大算力cpu的最大频率 * 1024
 static __always_inline
 unsigned long arch_scale_cpu_capacity(int cpu)
 {
