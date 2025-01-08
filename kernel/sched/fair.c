@@ -10619,9 +10619,9 @@ static int should_we_balance(struct lb_env *env)
  * Check this_cpu to ensure it is balanced within domain. Attempt to move
  * tasks if there is an imbalance.
  */
-// 主要功能：在@sd中找最busiest的group中最busiest的cpu作为src_cpu,
-//		把this_cpu(如果src_cpu上的tasks都不亲和this_cpu, 则要选同sg中的cpu做备选)作为dst_cpu,
-//		把scr_cpu上一些task pull到dst_cpu，使sd内负载均衡；
+// 主要功能：在@sd中计算this cpu所在local group和最繁忙的busiest group负载，
+//		判定的两者不均衡性，把busiest group中busiest cpu中一些task pull到this cpu，
+//		使sd内负载尽量均衡；
 // @this_cpu 本次要进行负载均衡的CPU。需要注意的是：对于new idle balance和tick balance而言，
 //			 this_cpu等于current cpu，在nohz idle balance场景中，this_cpu未必等于current cpu。
 // @sd @this_cpu所在的sd，可以是MC或DIE
