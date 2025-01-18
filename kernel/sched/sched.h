@@ -1673,6 +1673,8 @@ static inline struct task_group *task_group(struct task_struct *p)
 }
 
 /* Change a task's cfs_rq and parent entity if it moves across CPUs/groups */
+// 1. 衰减p->se blocked负载
+// 2. 更新p->se所在的cfs_rq和parent se;
 static inline void set_task_rq(struct task_struct *p, unsigned int cpu)
 {
 #if defined(CONFIG_FAIR_GROUP_SCHED) || defined(CONFIG_RT_GROUP_SCHED)
@@ -1701,8 +1703,10 @@ static inline struct task_group *task_group(struct task_struct *p)
 
 #endif /* CONFIG_CGROUP_SCHED */
 
+// 更新p->se，p->cpu, p->wake_cpu
 static inline void __set_task_cpu(struct task_struct *p, unsigned int cpu)
 {
+	// 更新p->se->cfs_rq, p->se->parent, p的blocked负载
 	set_task_rq(p, cpu);
 #ifdef CONFIG_SMP
 	/*
@@ -2670,6 +2674,7 @@ static inline unsigned long cpu_util_dl(struct rq *rq)
 	return READ_ONCE(rq->avg_dl.util_avg);
 }
 
+// 获取某个rq的cfs任务cpu利用率
 static inline unsigned long cpu_util_cfs(struct rq *rq)
 {
 	unsigned long util = READ_ONCE(rq->cfs.avg.util_avg);

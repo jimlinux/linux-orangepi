@@ -48,6 +48,7 @@ struct cpufreq_cpuinfo {
 	unsigned int		transition_latency;
 };
 
+// /sys/devices/system/cpu/cpufreq/policy0
 struct cpufreq_policy {
 	/* CPUs sharing clock, require sw coordination */
 	cpumask_var_t		cpus;	/* Online CPUs only */

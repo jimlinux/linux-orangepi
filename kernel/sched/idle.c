@@ -157,6 +157,7 @@ static int call_cpuidle(struct cpuidle_driver *drv, struct cpuidle_device *dev,
 	 * This function will block until an interrupt occurs and will take
 	 * care of re-enabling the local interrupts
 	 */
+	// 通过cpuidle state，进入该idle状态
 	return cpuidle_enter(drv, dev, next_state);
 }
 
@@ -231,17 +232,22 @@ static void cpuidle_idle_call(void)
 		/*
 		 * Ask the cpuidle framework to choose a convenient idle state.
 		 */
+		// 通过cpuidle governor，选择一个cpuidle state
 		next_state = cpuidle_select(drv, dev, &stop_tick);
 
+		// 是否关闭tick，进入nohz状态
 		if (stop_tick || tick_nohz_tick_stopped())
 			tick_nohz_idle_stop_tick();
 		else
 			tick_nohz_idle_retain_tick();
 
+		// 进入idle状态
 		entered_state = call_cpuidle(drv, dev, next_state);
+		// 被中断唤醒，但是无法响应执行irq handle
 		/*
 		 * Give the governor an opportunity to reflect on the outcome
 		 */
+		// 通知cpuidle governor，更新状态
 		cpuidle_reflect(dev, entered_state);
 	}
 
@@ -251,6 +257,7 @@ exit_idle:
 	/*
 	 * It is up to the idle functions to reenable local interrupts
 	 */
+	// enable中断，响应中断事件，跳转到对应的中断处理函数
 	if (WARN_ON_ONCE(irqs_disabled()))
 		local_irq_enable();
 }
@@ -301,6 +308,7 @@ static void do_idle(void)
 		} else {
 			cpuidle_idle_call();
 		}
+		// arm64无实现
 		arch_cpu_idle_exit();
 	}
 

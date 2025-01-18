@@ -103,6 +103,7 @@ static bool sugov_should_update_freq(struct sugov_policy *sg_policy, u64 time)
 	return delta_ns >= sg_policy->freq_update_delay_ns;
 }
 
+// 更新sg_policy->next_freq， 记录上次更新的freq
 static bool sugov_update_next_freq(struct sugov_policy *sg_policy, u64 time,
 				   unsigned int next_freq)
 {
@@ -176,9 +177,11 @@ static unsigned int get_next_freq(struct sugov_policy *sg_policy,
 #ifdef CONFIG_ARCH_ROCKCHIP
 		freq = div64_ul((u64)(100 * freq / sg_policy->tunables->target_load) * util, max);
 #else
+		// 1.25 * freq * util / max
 		freq = map_util_freq(util, freq, max);
 #endif
 
+	// freq没变，用cached freq，不用再调用下面函数计算一遍
 	if (freq == sg_policy->cached_raw_freq && !sg_policy->need_freq_update)
 		return sg_policy->next_freq;
 
@@ -296,6 +299,7 @@ unsigned long schedutil_cpu_util(int cpu, unsigned long util_cfs,
 }
 EXPORT_SYMBOL_GPL(schedutil_cpu_util);
 
+// 获取cpu综合利用率包括cfs,rt,dl,irq
 static unsigned long sugov_get_util(struct sugov_cpu *sg_cpu)
 {
 	struct rq *rq = cpu_rq(sg_cpu->cpu);
@@ -454,6 +458,7 @@ static inline void ignore_dl_rate_limit(struct sugov_cpu *sg_cpu, struct sugov_p
 		sg_policy->limits_changed = true;
 }
 
+// 获取当前cpu util，确定频率，更新之
 static void sugov_update_single(struct update_util_data *hook, u64 time,
 				unsigned int flags)
 {
@@ -471,14 +476,17 @@ static void sugov_update_single(struct update_util_data *hook, u64 time,
 	if (!sugov_should_update_freq(sg_policy, time))
 		return;
 
+	// 获取util
 	util = sugov_get_util(sg_cpu);
 	max = sg_cpu->max;
 	util = sugov_iowait_apply(sg_cpu, time, util, max);
+	// 计算对应频率
 	next_f = get_next_freq(sg_policy, util, max);
 	/*
 	 * Do not reduce the frequency if the CPU has not been idle
 	 * recently, as the reduction is likely to be premature then.
 	 */
+	// cpu没有idle前，不降频？
 	if (sugov_cpu_is_busy(sg_cpu) && next_f < sg_policy->next_freq) {
 		next_f = sg_policy->next_freq;
 
@@ -492,9 +500,11 @@ static void sugov_update_single(struct update_util_data *hook, u64 time,
 	 * necessary to acquire the lock in the fast switch case.
 	 */
 	if (sg_policy->policy->fast_switch_enabled) {
+		// 支持fast切换频率
 		sugov_fast_switch(sg_policy, time, next_f);
 	} else {
 		raw_spin_lock(&sg_policy->update_lock);
+		// 延迟降频
 		sugov_deferred_update(sg_policy, time, next_f);
 		raw_spin_unlock(&sg_policy->update_lock);
 	}

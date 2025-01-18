@@ -3429,6 +3429,8 @@ static inline void update_tg_load_avg(struct cfs_rq *cfs_rq)
  * caller only guarantees p->pi_lock is held; no other assumptions,
  * including the state of rq->lock, should be made.
  */
+// 更新se从prev取下时间段：prev->avg.last_update_time ~ se->avg.last_update_time
+// 衰减se的blocked负载
 void set_task_rq_fair(struct sched_entity *se,
 		      struct cfs_rq *prev, struct cfs_rq *next)
 {
