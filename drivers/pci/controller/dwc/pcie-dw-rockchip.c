@@ -186,7 +186,6 @@ struct rk_pcie {
 	struct dentry			*debugfs;
 	u32				msi_vector_num;
 	struct workqueue_struct		*hot_rst_wq;
-	struct work_struct		hot_rst_work;
 	u32				comp_prst[2];
 	u32				intx;
 };
@@ -2091,7 +2090,6 @@ retry_regulator:
 		ret = -ENOMEM;
 		goto remove_irq_domain;
 	}
-	INIT_WORK(&rk_pcie->hot_rst_work, rk_pcie_hot_rst_work);
 
 	switch (rk_pcie->mode) {
 	case RK_PCIE_RC_TYPE:
