@@ -1038,6 +1038,11 @@ struct rq {
 
 	/* This is used to determine avg_idle's max value */
 	u64			max_idle_balance_cost;
+
+	// for burst idle
+	u64			burst_idle_stamp;
+	u64			burst_avg_idle;
+	u64			burst_max_cost;
 #endif /* CONFIG_SMP */
 
 #ifdef CONFIG_IRQ_TIME_ACCOUNTING
