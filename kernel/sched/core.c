@@ -2703,6 +2703,11 @@ ttwu_stat(struct task_struct *p, int cpu, int wake_flags)
 /*
  * Mark the task runnable and perform wakeup-preemption.
  */
+// 之前已经p放在就绪队列了，
+// 此函数的功能：
+// 1. check p是否抢占curr
+// 2. 设置p state为TASK_RUNNING，表示唤醒已结束；
+// 是否投入运行还要看抢占情况；
 static void ttwu_do_wakeup(struct rq *rq, struct task_struct *p, int wake_flags,
 			   struct rq_flags *rf)
 {
@@ -2721,6 +2726,7 @@ static void ttwu_do_wakeup(struct rq *rq, struct task_struct *p, int wake_flags,
 		rq_repin_lock(rq, rf);
 	}
 
+	// idle_stamp记录cpu idle时间，说明这是idle后唤醒的第1个task，idle结束了
 	if (rq->idle_stamp) {
 		u64 delta = rq_clock(rq) - rq->idle_stamp;
 		u64 max = 2*rq->max_idle_balance_cost;
@@ -2735,6 +2741,7 @@ static void ttwu_do_wakeup(struct rq *rq, struct task_struct *p, int wake_flags,
 #endif
 }
 
+// 入队，唤醒
 static void
 ttwu_do_activate(struct rq *rq, struct task_struct *p, int wake_flags,
 		 struct rq_flags *rf)
@@ -2759,7 +2766,9 @@ ttwu_do_activate(struct rq *rq, struct task_struct *p, int wake_flags,
 		atomic_dec(&task_rq(p)->nr_iowait);
 	}
 
+	// 入队列
 	activate_task(rq, p, en_flags);
+	// 设状态
 	ttwu_do_wakeup(rq, p, wake_flags, rf);
 }
 
@@ -2788,6 +2797,7 @@ ttwu_do_activate(struct rq *rq, struct task_struct *p, int wake_flags,
  * Returns: %true when the wakeup is done,
  *          %false otherwise.
  */
+// 唤醒一个runnable的task，只需要ttwu_do_wakeup
 static int ttwu_runnable(struct task_struct *p, int wake_flags)
 {
 	struct rq_flags rf;
@@ -2957,6 +2967,8 @@ static void ttwu_queue(struct task_struct *p, int cpu, int wake_flags)
 	struct rq *rq = cpu_rq(cpu);
 	struct rq_flags rf;
 
+	// 如果curr cpu与selected cpu不共享缓存，
+	// 或者selected cpu空闲，那么把p放在selected cpu的wake list中，让selected cpu来唤醒
 	if (ttwu_queue_wakelist(p, cpu, wake_flags))
 		return;
 
@@ -3086,6 +3098,7 @@ static void ttwu_queue(struct task_struct *p, int cpu, int wake_flags)
  * Return: %true if @p->state changes (an actual wakeup was done),
  *	   %false otherwise.
  */
+// 尝试唤醒task p
 static int
 try_to_wake_up(struct task_struct *p, unsigned int state, int wake_flags)
 {
@@ -3093,6 +3106,7 @@ try_to_wake_up(struct task_struct *p, unsigned int state, int wake_flags)
 	int cpu, success = 0;
 
 	preempt_disable();
+	// p正在运行？ 可能是被中断唤醒，直接置为TASK_RUNNING即可
 	if (p == current) {
 		/*
 		 * We're waking current, this means 'p->on_rq' and 'task_cpu(p)
@@ -3139,6 +3153,7 @@ try_to_wake_up(struct task_struct *p, unsigned int state, int wake_flags)
 		goto unlock;
 #endif
 
+	// 唤醒中
 	trace_sched_waking(p);
 
 	/* We're going to change ->state: */
@@ -3167,6 +3182,7 @@ try_to_wake_up(struct task_struct *p, unsigned int state, int wake_flags)
 	 * A similar smb_rmb() lives in try_invoke_on_locked_down_task().
 	 */
 	smp_rmb();
+	// 唤醒runnable task
 	if (READ_ONCE(p->on_rq) && ttwu_runnable(p, wake_flags))
 		goto unlock;
 
@@ -3226,6 +3242,7 @@ try_to_wake_up(struct task_struct *p, unsigned int state, int wake_flags)
 	 * to ensure we observe the correct CPU on which the task is currently
 	 * scheduling.
 	 */
+	// p在其他cpu上正在执行，让其他cpu wakeup吧
 	if (smp_load_acquire(&p->on_cpu) &&
 	    ttwu_queue_wakelist(p, task_cpu(p), wake_flags | WF_ON_CPU))
 		goto unlock;
@@ -3243,6 +3260,7 @@ try_to_wake_up(struct task_struct *p, unsigned int state, int wake_flags)
 
 	trace_android_rvh_try_to_wake_up(p);
 
+	// 选核
 	cpu = select_task_rq(p, p->wake_cpu, SD_BALANCE_WAKE, wake_flags);
 	if (task_cpu(p) != cpu) {
 		if (p->in_iowait) {
@@ -3257,11 +3275,12 @@ try_to_wake_up(struct task_struct *p, unsigned int state, int wake_flags)
 #else
 	cpu = task_cpu(p);
 #endif /* CONFIG_SMP */
-	// 加入cpu的运行队列
+	// 入队，唤醒
 	ttwu_queue(p, cpu, wake_flags);
 unlock:
 	raw_spin_unlock_irqrestore(&p->pi_lock, flags);
 out:
+	// 统计数据
 	if (success) {
 		trace_android_rvh_try_to_wake_up_success(p);
 		ttwu_stat(p, task_cpu(p), wake_flags);

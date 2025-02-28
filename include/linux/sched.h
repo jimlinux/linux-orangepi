@@ -688,6 +688,9 @@ struct task_struct {
 	unsigned int			ptrace;
 
 #ifdef CONFIG_SMP
+	// p->on_cpu <- { 0, 1 }:
+	// 表示是否正在cpu上执行
+	// 由两个函数update：prepare_task / finish_task
 	int				on_cpu;
 	struct __call_single_node	wake_entry;
 #ifdef CONFIG_THREAD_INFO_IN_TASK
@@ -708,6 +711,11 @@ struct task_struct {
 	int				recent_used_cpu;
 	int				wake_cpu;
 #endif
+	// p->on_rq <- { 0, 1 = TASK_ON_RQ_QUEUED, 2 = TASK_ON_RQ_MIGRATING }:
+	// 0: 阻塞
+	// 1:表示runnable，包括正在执行和等待调度
+	// 2:runnable的任务正做cpu间迁移
+	// 由两个函数update：activate_task - enqueue_entity / deactivate_task - dequeue_entity
 	int				on_rq;
 
 	int				prio;

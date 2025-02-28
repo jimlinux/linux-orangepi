@@ -546,6 +546,9 @@ struct cfs_rq {
 	u64			min_vruntime_copy;
 #endif
 
+	// 就绪队列root
+	// 注意：
+	// 正在执行的se(包括下级有正在执行task的group se) 不在cfs_rq的rbtree上，由cfs_rq->curr指向；
 	struct rb_root_cached	tasks_timeline;
 
 	/*
@@ -553,7 +556,9 @@ struct cfs_rq {
 	 * It is set to NULL otherwise (i.e when none are currently running).
 	 */
 	// 注意：这里几个变量，可以是group se
-	struct sched_entity	*curr; // 当前执行的se
+	// 如果se正在执行或者se下级有task正在执行:
+	// cfs_rq_of(se)->curr == se
+	struct sched_entity	*curr; // cfs_rq上当前正在执行的se
 	struct sched_entity	*next; // 上次被唤醒的se, 在check_preempt_wakeup中设置
 	struct sched_entity	*last; // 上次唤醒别人的se
 	struct sched_entity	*skip;
