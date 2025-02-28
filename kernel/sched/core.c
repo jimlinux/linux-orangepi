@@ -4743,6 +4743,14 @@ restart:
  *
  * WARNING: must be called with preemption disabled!
  */
+// 调度场景：
+// 1. task自愿放弃CPU case，如阻塞，需先设置task->state, 如set_current_state(TASK_INTERRUPTIBLE);
+// 2. 抢占case，不需要设置state，prev->state为TASK_RUNNING
+// 	2.1 用户空间抢占
+//	2.2 内核抢占，参数preempt==true
+// 主要作用：
+// 1. 选择1个合适的进程
+// 2. 进程切换
 static void __sched notrace __schedule(bool preempt)
 {
 	struct task_struct *prev, *next;
