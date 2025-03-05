@@ -7512,7 +7512,7 @@ done: __maybe_unused;
 
 idle:
 	if (!rf)
-		return NULL;
+		goto burst;
 
 	new_tasks = newidle_balance(rq, rf);
 
@@ -7521,12 +7521,15 @@ idle:
 	 * possible for any higher priority task to appear. In that case we
 	 * must re-start the pick_next_entity() loop.
 	 */
+	// 由于loadbalance过程中，释放-重新持有了rq lock，在此期间可能有更高优class的任务过来
+	// 重新进入调度类loop
 	if (new_tasks < 0)
 		return RETRY_TASK;
 
 	if (new_tasks > 0)
 		goto again;
 
+burst:
 #ifdef CONFIG_CFS_BANDWIDTH
 	u64 t0 = sched_clock_cpu(rq->cpu);
 	rq->burst_idle_stamp = rq_clock(rq);
@@ -7549,6 +7552,7 @@ idle:
 	 * rq is about to be idle, check if we need to update the
 	 * lost_idle_time of clock_pelt
 	 */
+	// todo
 	update_idle_rq_clock_pelt(rq);
 
 	return NULL;

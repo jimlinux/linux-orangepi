@@ -4623,6 +4623,8 @@ pick_next_task(struct rq *rq, struct task_struct *prev, struct rq_flags *rf)
 	 * higher scheduling class, because otherwise those loose the
 	 * opportunity to pull in more work from other CPUs.
 	 */
+	// prev->sched_class 优先级小于等于 &fair_sched_class
+	// why？虽然rq上都是cfs tasks，但是要给更高优调度类做loadbalance机会
 	if (likely(prev->sched_class <= &fair_sched_class &&
 		   rq->nr_running == rq->cfs.h_nr_running)) {
 
@@ -4640,6 +4642,7 @@ pick_next_task(struct rq *rq, struct task_struct *prev, struct rq_flags *rf)
 	}
 
 restart:
+	// 主要是给非cfs调度类做loadbalance
 	put_prev_task_balance(rq, prev, rf);
 
 	for_each_class(class) {
