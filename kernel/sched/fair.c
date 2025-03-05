@@ -273,7 +273,6 @@ static inline struct task_struct *task_of(struct sched_entity *se)
 }
 
 /* Walk up scheduling entities hierarchy */
-// 从se开始沿着cgroup树向上一直到根节点
 #define for_each_sched_entity(se) \
 		for (; se; se = se->parent)
 
@@ -4922,22 +4921,11 @@ static void __account_cfs_rq_runtime(struct cfs_rq *cfs_rq, u64 delta_exec)
 	/* dock delta_exec before expiring quota (as it could span periods) */
 	cfs_rq->runtime_remaining -= delta_exec;
 
-	if(cfs_rq->boosted) {
-		struct cfs_bandwidth *cfs_b = tg_cfs_bandwidth(cfs_rq->tg);
-		raw_spin_lock(&cfs_b->lock);
-		cfs_b->boosted_time += delta_exec;
-		raw_spin_unlock(&cfs_b->lock);
-	}
-
 	if (likely(cfs_rq->runtime_remaining > 0))
 		return;
 
 	if (cfs_rq->throttled)
 		return;
-
-	if(cfs_rq->boosted) {
-		cfs_rq->boosted = 0;
-	}
 	/*
 	 * if we're unable to extend our runtime we resched so that the active
 	 * hierarchy can be throttled
@@ -5038,8 +5026,6 @@ static bool throttle_cfs_rq(struct cfs_rq *cfs_rq)
 	} else {
 		list_add_tail_rcu(&cfs_rq->throttled_list,
 				  &cfs_b->throttled_cfs_rq);
-		if(cfs_b->burst_idle)
-			list_add_tail_rcu(&cfs_rq->throttled_list_rq, &rq->throttled_cfs_rq);
 	}
 	raw_spin_unlock(&cfs_b->lock);
 
@@ -5103,9 +5089,6 @@ void unthrottle_cfs_rq(struct cfs_rq *cfs_rq)
 	raw_spin_lock(&cfs_b->lock);
 	cfs_b->throttled_time += rq_clock(rq) - cfs_rq->throttled_clock;
 	list_del_rcu(&cfs_rq->throttled_list);
-	if(cfs_rq->throttled_list_rq.prev != LIST_POISON2) {
-		list_del_rcu(&cfs_rq->throttled_list_rq);
-	}
 	raw_spin_unlock(&cfs_b->lock);
 
 	/* update hierarchical throttle state */
@@ -5393,54 +5376,6 @@ static void do_sched_cfs_slack_timer(struct cfs_bandwidth *cfs_b)
 	raw_spin_unlock_irqrestore(&cfs_b->lock, flags);
 }
 
-static u64 distribute_cfs_runtime_boost(struct rq *cur_rq)
-{
-	struct cfs_rq *cfs_rq;
-	u64 runtime;
-	u64 total_runtime = 0;
-	unsigned long flags;
-	u64 slice = sched_cfs_bandwidth_slice();
-
-	rcu_read_lock();
-	list_for_each_entry_rcu(cfs_rq, &cur_rq->throttled_cfs_rq,
-							throttled_list_rq) {
-		struct cfs_bandwidth *cfs_b = tg_cfs_bandwidth(cfs_rq->tg);
-		/* confirm we're still not at a refresh boundary */
-		raw_spin_lock_irqsave(&cfs_b->lock, flags);
-		if (runtime_refresh_within(cfs_b, min_bandwidth_expiration)
-				|| cfs_b->quota == RUNTIME_INF) {
-				raw_spin_unlock_irqrestore(&cfs_b->lock, flags);
-				continue;
-		}
-
-		raw_spin_unlock_irqrestore(&cfs_b->lock, flags);
-
-		if (!cfs_rq_throttled(cfs_rq)) {
-			continue;
-		}
-
-		/* By the above check, this should never be true */
-		SCHED_WARN_ON(cfs_rq->runtime_remaining > 0);
-
-		// temp 5ms
-		runtime = -cfs_rq->runtime_remaining + slice;
-
-		cfs_rq->runtime_remaining += runtime;
-		cfs_rq->boosted = 1;
-
-		total_runtime += runtime;
-
-		/* we check whether we're throttled above */
-		if (cfs_rq->runtime_remaining > 0)
-			unthrottle_cfs_rq(cfs_rq);
-
-		raw_spin_lock_irqsave(&cfs_b->lock, flags);
-		raw_spin_unlock_irqrestore(&cfs_b->lock, flags);
-	}
-	rcu_read_unlock();
-	return total_runtime;
-}
-
 /*
  * When a group wakes up we want to make sure that its quota is not already
  * expired/exceeded, otherwise it may be allowed to steal additional ticks of
@@ -5514,7 +5449,6 @@ static enum hrtimer_restart sched_cfs_slack_timer(struct hrtimer *timer)
 
 extern const u64 max_cfs_quota_period;
 
-// 每个period周期调用
 static enum hrtimer_restart sched_cfs_period_timer(struct hrtimer *timer)
 {
 	struct cfs_bandwidth *cfs_b =
@@ -5575,7 +5509,6 @@ void init_cfs_bandwidth(struct cfs_bandwidth *cfs_b)
 	cfs_b->runtime = 0;
 	cfs_b->quota = RUNTIME_INF;
 	cfs_b->period = ns_to_ktime(default_cfs_period());
-	cfs_b->burst_idle = 0;
 
 	INIT_LIST_HEAD(&cfs_b->throttled_cfs_rq);
 	hrtimer_init(&cfs_b->period_timer, CLOCK_MONOTONIC, HRTIMER_MODE_ABS_PINNED);
@@ -5589,7 +5522,6 @@ static void init_cfs_rq_runtime(struct cfs_rq *cfs_rq)
 {
 	cfs_rq->runtime_enabled = 0;
 	INIT_LIST_HEAD(&cfs_rq->throttled_list);
-	INIT_LIST_HEAD(&cfs_rq->throttled_list_rq);
 }
 
 void start_cfs_bandwidth(struct cfs_bandwidth *cfs_b)
@@ -7576,9 +7508,9 @@ static unsigned long wakeup_gran(struct sched_entity *se)
  *         g
  *      |<--->|c
  *
- *  w(c, s1) = -1 // c's < s1's vruntime 不抢占
- *  w(c, s2) =  0 // c's - s2's <= gran 不抢占
- *  w(c, s3) =  1 // c's - s3's > gran 抢占
+ *  w(c, s1) = -1
+ *  w(c, s2) =  0
+ *  w(c, s3) =  1
  *
  */
 // 功能：判断se是否可抢占curr，是则return 1，否则return0或者-1
@@ -7743,7 +7675,6 @@ pick_next_task_fair(struct rq *rq, struct task_struct *prev, struct rq_flags *rf
 	struct task_struct *p = NULL;
 	int new_tasks;
 	bool repick = false;
-	int throttled = false;
 
 again:
 	// 当前rq上没有任务了
@@ -7901,16 +7832,6 @@ idle:
 	if (new_tasks > 0)
 		goto again;
 
-#ifdef CONFIG_CFS_BANDWIDTH
-	throttled = !list_empty(&rq->throttled_cfs_rq);
-	if(throttled) {
-		u64 total_runtime;
-		total_runtime = distribute_cfs_runtime_boost(rq);
-		if(total_runtime > 0) {
-			goto again;
-		}
-	}
-#endif
 	/*
 	 * rq is about to be idle, check if we need to update the
 	 * lost_idle_time of clock_pelt
