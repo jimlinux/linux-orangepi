@@ -724,6 +724,8 @@ do {									\
 #define P64(n) SEQ_printf(m, "  .%-30s: %Ld\n", #n, rq->n);
 	P64(avg_idle);
 	P64(max_idle_balance_cost);
+	P64(burst_avg_idle);
+	P64(burst_max_cost);
 #undef P64
 #endif
 

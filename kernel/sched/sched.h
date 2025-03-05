@@ -382,6 +382,8 @@ struct cfs_bandwidth {
 	struct hrtimer		slack_timer;
 	struct list_head	throttled_cfs_rq;
 
+	struct list_head	boosted_cfs_rq;
+
 	/* Statistics: */
 	int			nr_periods;
 	int			nr_throttled;
@@ -631,7 +633,9 @@ struct cfs_rq {
 	int			throttled;
 	int			throttle_count;
 	struct list_head	throttled_list;
-	struct list_head	throttled_list_rq;
+	struct list_head	throttled_rq_list;
+	struct list_head	boosted_list;
+	s64			runtime_boosted;
 	int			boosted;
 #endif /* CONFIG_CFS_BANDWIDTH */
 
@@ -1076,6 +1080,11 @@ struct rq {
 	/* This is used to determine avg_idle's max value */
 	// 该CPU进行new idle balance的最大开销。
 	u64			max_idle_balance_cost;
+
+	// for burst idle
+	u64			burst_idle_stamp;
+	u64			burst_avg_idle;
+	u64			burst_max_cost;
 #endif /* CONFIG_SMP */
 
 #ifdef CONFIG_IRQ_TIME_ACCOUNTING

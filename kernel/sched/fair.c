@@ -4927,6 +4927,8 @@ static void __account_cfs_rq_runtime(struct cfs_rq *cfs_rq, u64 delta_exec)
 		raw_spin_lock(&cfs_b->lock);
 		cfs_b->boosted_time += delta_exec;
 		raw_spin_unlock(&cfs_b->lock);
+
+		cfs_rq->runtime_boosted -= delta_exec;
 	}
 
 	if (likely(cfs_rq->runtime_remaining > 0))
@@ -4935,9 +4937,6 @@ static void __account_cfs_rq_runtime(struct cfs_rq *cfs_rq, u64 delta_exec)
 	if (cfs_rq->throttled)
 		return;
 
-	if(cfs_rq->boosted) {
-		cfs_rq->boosted = 0;
-	}
 	/*
 	 * if we're unable to extend our runtime we resched so that the active
 	 * hierarchy can be throttled
@@ -5016,6 +5015,31 @@ static int tg_throttle_down(struct task_group *tg, void *data)
 	return 0;
 }
 
+static int burst_off_down(struct task_group *tg, void *data)
+{
+	struct rq *rq = data;
+	struct cfs_rq *cfs_rq = tg->cfs_rq[cpu_of(rq)];
+	cfs_rq->boosted = 0;
+	return 0;
+}
+
+static int burst_on_up(struct task_group *tg, void *data)
+{
+	struct rq *rq = data;
+	struct cfs_rq *cfs_rq = tg->cfs_rq[cpu_of(rq)];
+	cfs_rq->boosted = 1;
+	return 0;
+}
+
+static void set_burst_state(struct cfs_rq *cfs_rq, int state) {
+	struct rq *rq = rq_of(cfs_rq);
+	if (state) {
+		walk_tg_tree_from(cfs_rq->tg, tg_nop, burst_on_up, (void *)rq);
+	} else {
+		walk_tg_tree_from(cfs_rq->tg, burst_off_down, tg_nop, (void *)rq);
+	}
+}
+
 static bool throttle_cfs_rq(struct cfs_rq *cfs_rq)
 {
 	struct rq *rq = rq_of(cfs_rq);
@@ -5038,8 +5062,17 @@ static bool throttle_cfs_rq(struct cfs_rq *cfs_rq)
 	} else {
 		list_add_tail_rcu(&cfs_rq->throttled_list,
 				  &cfs_b->throttled_cfs_rq);
-		if(cfs_b->burst_idle)
-			list_add_tail_rcu(&cfs_rq->throttled_list_rq, &rq->throttled_cfs_rq);
+		if(cfs_b->burst_idle) {
+			list_add_tail_rcu(&cfs_rq->throttled_rq_list, &rq->throttled_cfs_rq);
+			if (cfs_rq->boosted) {
+				rcu_read_lock();
+				set_burst_state(cfs_rq, 0);
+				rcu_read_unlock();
+				cfs_rq->runtime_remaining -= cfs_rq->runtime_boosted;
+				cfs_rq->runtime_boosted = 0;
+				list_del_rcu(&cfs_rq->boosted_list);
+			}
+		}
 	}
 	raw_spin_unlock(&cfs_b->lock);
 
@@ -5103,8 +5136,9 @@ void unthrottle_cfs_rq(struct cfs_rq *cfs_rq)
 	raw_spin_lock(&cfs_b->lock);
 	cfs_b->throttled_time += rq_clock(rq) - cfs_rq->throttled_clock;
 	list_del_rcu(&cfs_rq->throttled_list);
-	if(cfs_rq->throttled_list_rq.prev != LIST_POISON2) {
-		list_del_rcu(&cfs_rq->throttled_list_rq);
+	// check if throttled_rq_list added into rq->throttled_cfs_rq
+	if(cfs_rq->throttled_rq_list.prev != LIST_POISON2) {
+		list_del_rcu(&cfs_rq->throttled_rq_list);
 	}
 	raw_spin_unlock(&cfs_b->lock);
 
@@ -5116,6 +5150,7 @@ void unthrottle_cfs_rq(struct cfs_rq *cfs_rq)
 
 	task_delta = cfs_rq->h_nr_running;
 	idle_task_delta = cfs_rq->idle_h_nr_running;
+	// 把se及其parent（如果parent也不在就绪队列）入队
 	for_each_sched_entity(se) {
 		if (se->on_rq)
 			break;
@@ -5129,7 +5164,7 @@ void unthrottle_cfs_rq(struct cfs_rq *cfs_rq)
 		if (cfs_rq_throttled(cfs_rq))
 			goto unthrottle_throttle;
 	}
-
+	// 继续向上到root，update负载
 	for_each_sched_entity(se) {
 		cfs_rq = cfs_rq_of(se);
 
@@ -5224,6 +5259,7 @@ next:
  */
 static int do_sched_cfs_period_timer(struct cfs_bandwidth *cfs_b, int overrun, unsigned long flags)
 {
+	struct cfs_rq *cfs_rq;
 	int throttled;
 
 	/* no need to continue the timer with no bandwidth constraint */
@@ -5241,6 +5277,30 @@ static int do_sched_cfs_period_timer(struct cfs_bandwidth *cfs_b, int overrun, u
 		goto out_deactivate;
 
 	__refill_cfs_bandwidth_runtime(cfs_b);
+
+	// reset boosted cfs
+	// must unlock cfs_b lock here, and do rq_lock, cfs_b->lock sequence
+	raw_spin_unlock_irqrestore(&cfs_b->lock, flags);
+	rcu_read_lock();
+	list_for_each_entry_rcu(cfs_rq, &cfs_b->boosted_cfs_rq,
+				boosted_list) {
+		struct rq *rq = rq_of(cfs_rq);
+		struct rq_flags rf;
+
+		rq_lock_irqsave(rq, &rf);
+		// must check boosted flag, maybe alreday del in throttle_cfs_rq
+		if(cfs_rq->boosted) {
+			set_burst_state(cfs_rq, 0);
+			cfs_rq->runtime_remaining -= cfs_rq->runtime_boosted;
+			cfs_rq->runtime_boosted = 0;
+			raw_spin_lock_irqsave(&cfs_b->lock, flags);
+			list_del_rcu(&cfs_rq->boosted_list);
+			raw_spin_unlock_irqrestore(&cfs_b->lock, flags);
+		}
+		rq_unlock_irqrestore(rq, &rf);
+	}
+	rcu_read_unlock();
+	raw_spin_lock_irqsave(&cfs_b->lock, flags);
 
 	if (!throttled) {
 		/* mark as potentially idle for the upcoming period */
@@ -5332,6 +5392,9 @@ static void __return_cfs_rq_runtime(struct cfs_rq *cfs_rq)
 	struct cfs_bandwidth *cfs_b = tg_cfs_bandwidth(cfs_rq->tg);
 	s64 slack_runtime = cfs_rq->runtime_remaining - min_cfs_rq_runtime;
 
+	if(cfs_rq->boosted)
+		return;
+
 	if (slack_runtime <= 0)
 		return;
 
@@ -5393,17 +5456,18 @@ static void do_sched_cfs_slack_timer(struct cfs_bandwidth *cfs_b)
 	raw_spin_unlock_irqrestore(&cfs_b->lock, flags);
 }
 
+// called by pick_next_task_fair, already hold rq lock
 static u64 distribute_cfs_runtime_boost(struct rq *cur_rq)
 {
 	struct cfs_rq *cfs_rq;
 	u64 runtime;
 	u64 total_runtime = 0;
 	unsigned long flags;
-	u64 slice = sched_cfs_bandwidth_slice();
+	u64 slice = sched_cfs_bandwidth_slice() / 2;
 
 	rcu_read_lock();
 	list_for_each_entry_rcu(cfs_rq, &cur_rq->throttled_cfs_rq,
-							throttled_list_rq) {
+							throttled_rq_list) {
 		struct cfs_bandwidth *cfs_b = tg_cfs_bandwidth(cfs_rq->tg);
 		/* confirm we're still not at a refresh boundary */
 		raw_spin_lock_irqsave(&cfs_b->lock, flags);
@@ -5413,29 +5477,30 @@ static u64 distribute_cfs_runtime_boost(struct rq *cur_rq)
 				continue;
 		}
 
-		raw_spin_unlock_irqrestore(&cfs_b->lock, flags);
-
-		if (!cfs_rq_throttled(cfs_rq)) {
+		if (!cfs_rq_throttled(cfs_rq)
+				|| cfs_rq->runtime_remaining > 0) {
+			raw_spin_unlock_irqrestore(&cfs_b->lock, flags);
 			continue;
 		}
 
-		/* By the above check, this should never be true */
-		SCHED_WARN_ON(cfs_rq->runtime_remaining > 0);
+		// add to cfs_b boosted_cfs_rq
+		list_add_tail_rcu(&cfs_rq->boosted_list,
+				  &cfs_b->boosted_cfs_rq);
 
-		// temp 5ms
+		raw_spin_unlock_irqrestore(&cfs_b->lock, flags);
+
+		// temp 5ms / 2
 		runtime = -cfs_rq->runtime_remaining + slice;
 
 		cfs_rq->runtime_remaining += runtime;
-		cfs_rq->boosted = 1;
+		cfs_rq->runtime_boosted = runtime;
+		set_burst_state(cfs_rq, 1);
 
 		total_runtime += runtime;
 
 		/* we check whether we're throttled above */
 		if (cfs_rq->runtime_remaining > 0)
 			unthrottle_cfs_rq(cfs_rq);
-
-		raw_spin_lock_irqsave(&cfs_b->lock, flags);
-		raw_spin_unlock_irqrestore(&cfs_b->lock, flags);
 	}
 	rcu_read_unlock();
 	return total_runtime;
@@ -5578,6 +5643,7 @@ void init_cfs_bandwidth(struct cfs_bandwidth *cfs_b)
 	cfs_b->burst_idle = 0;
 
 	INIT_LIST_HEAD(&cfs_b->throttled_cfs_rq);
+	INIT_LIST_HEAD(&cfs_b->boosted_cfs_rq);
 	hrtimer_init(&cfs_b->period_timer, CLOCK_MONOTONIC, HRTIMER_MODE_ABS_PINNED);
 	cfs_b->period_timer.function = sched_cfs_period_timer;
 	hrtimer_init(&cfs_b->slack_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
@@ -5589,7 +5655,8 @@ static void init_cfs_rq_runtime(struct cfs_rq *cfs_rq)
 {
 	cfs_rq->runtime_enabled = 0;
 	INIT_LIST_HEAD(&cfs_rq->throttled_list);
-	INIT_LIST_HEAD(&cfs_rq->throttled_list_rq);
+	INIT_LIST_HEAD(&cfs_rq->throttled_rq_list);
+	INIT_LIST_HEAD(&cfs_rq->boosted_list);
 }
 
 void start_cfs_bandwidth(struct cfs_bandwidth *cfs_b)
@@ -7605,6 +7672,9 @@ static void set_last_buddy(struct sched_entity *se)
 	if (entity_is_task(se) && unlikely(task_has_idle_policy(task_of(se))))
 		return;
 
+	if ((se->cfs_rq && se->cfs_rq->boosted) || (se->my_q && se->my_q->boosted))
+		return;
+
 	for_each_sched_entity(se) {
 		if (SCHED_WARN_ON(!se->on_rq))
 			return;
@@ -7615,6 +7685,9 @@ static void set_last_buddy(struct sched_entity *se)
 static void set_next_buddy(struct sched_entity *se)
 {
 	if (entity_is_task(se) && unlikely(task_has_idle_policy(task_of(se))))
+		return;
+	
+	if ((se->cfs_rq && se->cfs_rq->boosted) || (se->my_q && se->my_q->boosted))
 		return;
 
 	for_each_sched_entity(se) {
@@ -7634,6 +7707,7 @@ static void set_skip_buddy(struct sched_entity *se)
  * Preempt the current task with a newly woken task if needed:
  */
 // 主要功能：检查p是否能抢占cur，是则set resched flag
+// p是否要抢占cur
 static void check_preempt_wakeup(struct rq *rq, struct task_struct *p, int wake_flags)
 {
 	struct task_struct *curr = rq->curr;
@@ -7678,6 +7752,18 @@ static void check_preempt_wakeup(struct rq *rq, struct task_struct *p, int wake_
 	if (unlikely(task_has_idle_policy(curr)) &&
 	    likely(!task_has_idle_policy(p)))
 		goto preempt;
+
+	if (cfs_rq->boosted && !cfs_rq_of(pse)->boosted) {
+		// todo
+		for_each_sched_entity(se) {
+			struct cfs_rq * cfs_rq = cfs_rq_of(se);
+			if(!cfs_rq->boosted)
+				break;
+			cfs_rq->runtime_remaining -= cfs_rq->runtime_boosted;
+			cfs_rq->runtime_boosted = 0;
+		}
+		goto preempt;
+	}
 
 	/*
 	 * Batch and idle tasks do not preempt non-idle tasks (their preemption
@@ -7887,7 +7973,7 @@ done: __maybe_unused;
 
 idle:
 	if (!rf)
-		return NULL;
+		goto burst;
 
 	// 没有其他task可运行，去给其他cpu帮忙
 	new_tasks = newidle_balance(rq, rf);
@@ -7897,18 +7983,29 @@ idle:
 	 * possible for any higher priority task to appear. In that case we
 	 * must re-start the pick_next_entity() loop.
 	 */
+	// 由于loadbalance过程中，释放-重新持有了rq lock，在此期间可能有更高优class的任务过来
+	// 重新进入调度类loop
 	if (new_tasks < 0)
 		return RETRY_TASK;
 
 	if (new_tasks > 0)
 		goto again;
 
+burst:
 #ifdef CONFIG_CFS_BANDWIDTH
+	u64 t0 = sched_clock_cpu(rq->cpu);
+	rq->burst_idle_stamp = rq_clock(rq);
 	throttled = !list_empty(&rq->throttled_cfs_rq);
 	if(throttled) {
 		u64 total_runtime;
 		total_runtime = distribute_cfs_runtime_boost(rq);
+		u64 cost = sched_clock_cpu(rq->cpu) - t0;
+		if (rq->burst_max_cost < cost)
+			rq->burst_max_cost = cost;
+		// printk("zjm cpu=%d cost=%d, burst_max_cost=%d, burst_avg_idle=%d",
+		// 	rq->cpu, cost, rq->burst_max_cost, rq->burst_avg_idle);
 		if(total_runtime > 0) {
+			rq->burst_idle_stamp = 0;
 			goto again;
 		}
 	}
@@ -7917,6 +8014,7 @@ idle:
 	 * rq is about to be idle, check if we need to update the
 	 * lost_idle_time of clock_pelt
 	 */
+	// todo
 	update_idle_rq_clock_pelt(rq);
 
 	return NULL;
@@ -8245,6 +8343,9 @@ static int task_hot(struct task_struct *p, struct lb_env *env)
 		return 0;
 
 	if (unlikely(task_has_idle_policy(p)))
+		return 0;
+
+	if (cfs_rq_of(&p->se)->boosted)
 		return 0;
 
 	/* SMT siblings share cache */

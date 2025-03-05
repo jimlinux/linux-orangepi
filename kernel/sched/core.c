@@ -844,6 +844,9 @@ bool sched_can_stop_tick(struct rq *rq)
  *
  * Caller must hold rcu_lock or sufficient equivalent.
  */
+// NB!
+// down: 先根遍历
+// up：后根遍历
 int walk_tg_tree_from(struct task_group *from,
 			     tg_visitor down, tg_visitor up, void *data)
 {
@@ -2737,6 +2740,12 @@ static void ttwu_do_wakeup(struct rq *rq, struct task_struct *p, int wake_flags,
 			rq->avg_idle = max;
 
 		rq->idle_stamp = 0;
+	}
+
+	if (rq->burst_idle_stamp) {
+		u64 delta = rq_clock(rq) - rq->burst_idle_stamp;
+		update_avg(&rq->burst_avg_idle, delta);
+		rq->burst_idle_stamp = 0;
 	}
 #endif
 }
@@ -4675,6 +4684,8 @@ pick_next_task(struct rq *rq, struct task_struct *prev, struct rq_flags *rf)
 	 * higher scheduling class, because otherwise those loose the
 	 * opportunity to pull in more work from other CPUs.
 	 */
+	// prev->sched_class 优先级小于等于 &fair_sched_class
+	// why？虽然rq上都是cfs tasks，但是要给更高优调度类做loadbalance机会
 	if (likely(prev->sched_class <= &fair_sched_class &&
 		   rq->nr_running == rq->cfs.h_nr_running)) {
 
@@ -4692,6 +4703,7 @@ pick_next_task(struct rq *rq, struct task_struct *prev, struct rq_flags *rf)
 	}
 
 restart:
+	// 主要是给非cfs调度类做loadbalance
 	put_prev_task_balance(rq, prev, rf);
 
 	for_each_class(class) {
@@ -7666,6 +7678,9 @@ void __init sched_init(void)
 		rq->idle_stamp = 0;
 		rq->avg_idle = 2*sysctl_sched_migration_cost;
 		rq->max_idle_balance_cost = sysctl_sched_migration_cost;
+		rq->burst_idle_stamp = 0;
+		rq->burst_avg_idle = 0;
+		rq->burst_max_cost = 0;
 
 		INIT_LIST_HEAD(&rq->cfs_tasks);
 
@@ -8487,6 +8502,7 @@ static int tg_set_cfs_bandwidth(struct task_group *tg, u64 period, u64 quota, u6
 		rq_lock_irq(rq, &rf);
 		cfs_rq->runtime_enabled = runtime_enabled;
 		cfs_rq->runtime_remaining = 0;
+		cfs_rq->runtime_boosted = 0;
 
 		if (cfs_rq->throttled)
 			unthrottle_cfs_rq(cfs_rq);
