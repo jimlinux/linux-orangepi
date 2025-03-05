@@ -7687,6 +7687,8 @@ static void check_preempt_wakeup(struct rq *rq, struct task_struct *p, int wake_
 		return;
 
 	// 向上走，直到se和pse在同一个cfs rq
+	// why? 因为p和curr可能在不同的task group，其vruntime不具有可比性
+	// 所以这里找到共同的cfs rq，再进行下面的vruntime比较
 	find_matching_se(&se, &pse);
 	update_curr(cfs_rq_of(se));
 	trace_android_rvh_check_preempt_wakeup(rq, p, &preempt, &nopreempt,
