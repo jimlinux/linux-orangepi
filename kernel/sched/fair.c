@@ -4926,12 +4926,13 @@ static void __account_cfs_rq_runtime(struct cfs_rq *cfs_rq, u64 delta_exec)
 	/* dock delta_exec before expiring quota (as it could span periods) */
 	cfs_rq->runtime_remaining -= delta_exec;
 
-	if(cfs_rq->boosted) {
+	if(cfs_rq->bursted) {
+		/*
 		struct cfs_bandwidth *cfs_b = tg_cfs_bandwidth(cfs_rq->tg);
 		raw_spin_lock(&cfs_b->lock);
 		cfs_b->boosted_time += delta_exec;
 		raw_spin_unlock(&cfs_b->lock);
-
+		*/
 		cfs_rq->runtime_boosted -= delta_exec;
 	}
 
@@ -5023,7 +5024,7 @@ static int burst_off_down(struct task_group *tg, void *data)
 {
 	struct rq *rq = data;
 	struct cfs_rq *cfs_rq = tg->cfs_rq[cpu_of(rq)];
-	cfs_rq->boosted = 0;
+	cfs_rq->bursted = false;
 	return 0;
 }
 
@@ -5031,11 +5032,12 @@ static int burst_on_up(struct task_group *tg, void *data)
 {
 	struct rq *rq = data;
 	struct cfs_rq *cfs_rq = tg->cfs_rq[cpu_of(rq)];
-	cfs_rq->boosted = 1;
+	cfs_rq->bursted = true;
 	return 0;
 }
 
-static void set_burst_state(struct cfs_rq *cfs_rq, int state) {
+// todo:
+static void set_burst_state(struct cfs_rq *cfs_rq, bool state) {
 	struct rq *rq = rq_of(cfs_rq);
 	if (state) {
 		walk_tg_tree_from(cfs_rq->tg, tg_nop, burst_on_up, (void *)rq);
@@ -5068,13 +5070,15 @@ static bool throttle_cfs_rq(struct cfs_rq *cfs_rq)
 				  &cfs_b->throttled_cfs_rq);
 		if(cfs_b->burst_idle) {
 			list_add_tail_rcu(&cfs_rq->throttled_rq_list, &rq->throttled_cfs_rq);
-			if (cfs_rq->boosted) {
+			if (cfs_rq->bursted) {
 				rcu_read_lock();
-				set_burst_state(cfs_rq, 0);
+				set_burst_state(cfs_rq, false);
 				rcu_read_unlock();
 				cfs_rq->runtime_remaining -= cfs_rq->runtime_boosted;
 				cfs_rq->runtime_boosted = 0;
+				list_del_rcu(&cfs_rq->boosted_rq_list);
 				list_del_rcu(&cfs_rq->boosted_list);
+				rq->nr_bursted_cfs_rq--;
 			}
 		}
 	}
@@ -5124,12 +5128,33 @@ static bool throttle_cfs_rq(struct cfs_rq *cfs_rq)
 	return true;
 }
 
+void reset_bursted_cfs_rq(struct cfs_rq *cfs_rq) {
+	struct rq *rq = rq_of(cfs_rq);
+	if (!cfs_rq->bursted && rq->nr_bursted_cfs_rq > 0) {
+		struct cfs_rq *boosted_cfs_rq;
+		rcu_read_lock();
+		list_for_each_entry_rcu(boosted_cfs_rq, &rq->bursted_cfs_rq,
+					boosted_rq_list) {
+			// must check boosted flag, maybe alreday del in throttle_cfs_rq
+			if(boosted_cfs_rq->bursted) {
+				boosted_cfs_rq->runtime_remaining -= boosted_cfs_rq->runtime_boosted;
+				boosted_cfs_rq->runtime_boosted = 0;
+				if (!boosted_cfs_rq->curr)
+					throttle_cfs_rq(boosted_cfs_rq);
+			}
+		}
+		rcu_read_unlock();
+	}
+}
+
 void unthrottle_cfs_rq(struct cfs_rq *cfs_rq)
 {
 	struct rq *rq = rq_of(cfs_rq);
 	struct cfs_bandwidth *cfs_b = tg_cfs_bandwidth(cfs_rq->tg);
 	struct sched_entity *se;
 	long task_delta, idle_task_delta;
+
+	reset_bursted_cfs_rq(cfs_rq);
 
 	se = cfs_rq->tg->se[cpu_of(rq)];
 
@@ -5282,21 +5307,26 @@ static int do_sched_cfs_period_timer(struct cfs_bandwidth *cfs_b, int overrun, u
 
 	__refill_cfs_bandwidth_runtime(cfs_b);
 
+	// cfs在burst运行中，需要处理；
 	// reset boosted cfs
 	// must unlock cfs_b lock here, and do rq_lock, cfs_b->lock sequence
 	raw_spin_unlock_irqrestore(&cfs_b->lock, flags);
 	rcu_read_lock();
-	list_for_each_entry_rcu(cfs_rq, &cfs_b->boosted_cfs_rq,
+	list_for_each_entry_rcu(cfs_rq, &cfs_b->bursted_cfs_rq,
 				boosted_list) {
 		struct rq *rq = rq_of(cfs_rq);
 		struct rq_flags rf;
 
 		rq_lock_irqsave(rq, &rf);
 		// must check boosted flag, maybe alreday del in throttle_cfs_rq
-		if(cfs_rq->boosted) {
-			set_burst_state(cfs_rq, 0);
+		if(cfs_rq->bursted) {
+			set_burst_state(cfs_rq, false);
+			// todo, runtime_remaining恢复后<=0
+			// 这里要从cfs_b->runtime 分配时间，使runtime_remaining>0
 			cfs_rq->runtime_remaining -= cfs_rq->runtime_boosted;
 			cfs_rq->runtime_boosted = 0;
+			list_del_rcu(&cfs_rq->boosted_rq_list);
+			rq->nr_bursted_cfs_rq--;
 			raw_spin_lock_irqsave(&cfs_b->lock, flags);
 			list_del_rcu(&cfs_rq->boosted_list);
 			raw_spin_unlock_irqrestore(&cfs_b->lock, flags);
@@ -5396,7 +5426,7 @@ static void __return_cfs_rq_runtime(struct cfs_rq *cfs_rq)
 	struct cfs_bandwidth *cfs_b = tg_cfs_bandwidth(cfs_rq->tg);
 	s64 slack_runtime = cfs_rq->runtime_remaining - min_cfs_rq_runtime;
 
-	if(cfs_rq->boosted)
+	if(cfs_b->burst_idle && cfs_rq->bursted)
 		return;
 
 	if (slack_runtime <= 0)
@@ -5487,24 +5517,32 @@ static u64 distribute_cfs_runtime_boost(struct rq *cur_rq)
 			continue;
 		}
 
-		// add to cfs_b boosted_cfs_rq
+		// add to cfs_b bursted_cfs_rq
 		list_add_tail_rcu(&cfs_rq->boosted_list,
-				  &cfs_b->boosted_cfs_rq);
+				  &cfs_b->bursted_cfs_rq);
 
 		raw_spin_unlock_irqrestore(&cfs_b->lock, flags);
+
+		// add to rq bursted_cfs_rq
+		list_add_tail_rcu(&cfs_rq->boosted_rq_list,
+				  &cur_rq->bursted_cfs_rq);
+
+		cur_rq->nr_bursted_cfs_rq++;
+
+		set_burst_state(cfs_rq, true);
 
 		// temp 5ms / 2
 		runtime = -cfs_rq->runtime_remaining + slice;
 
 		cfs_rq->runtime_remaining += runtime;
 		cfs_rq->runtime_boosted = runtime;
-		set_burst_state(cfs_rq, 1);
 
 		total_runtime += runtime;
 
 		/* we check whether we're throttled above */
-		if (cfs_rq->runtime_remaining > 0)
+		if (cfs_rq->runtime_remaining > 0) {
 			unthrottle_cfs_rq(cfs_rq);
+		}
 	}
 	rcu_read_unlock();
 	return total_runtime;
@@ -5647,7 +5685,7 @@ void init_cfs_bandwidth(struct cfs_bandwidth *cfs_b)
 	cfs_b->burst_idle = 0;
 
 	INIT_LIST_HEAD(&cfs_b->throttled_cfs_rq);
-	INIT_LIST_HEAD(&cfs_b->boosted_cfs_rq);
+	INIT_LIST_HEAD(&cfs_b->bursted_cfs_rq);
 	hrtimer_init(&cfs_b->period_timer, CLOCK_MONOTONIC, HRTIMER_MODE_ABS_PINNED);
 	cfs_b->period_timer.function = sched_cfs_period_timer;
 	hrtimer_init(&cfs_b->slack_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
@@ -5661,6 +5699,7 @@ static void init_cfs_rq_runtime(struct cfs_rq *cfs_rq)
 	INIT_LIST_HEAD(&cfs_rq->throttled_list);
 	INIT_LIST_HEAD(&cfs_rq->throttled_rq_list);
 	INIT_LIST_HEAD(&cfs_rq->boosted_list);
+	INIT_LIST_HEAD(&cfs_rq->boosted_rq_list);
 }
 
 void start_cfs_bandwidth(struct cfs_bandwidth *cfs_b)
@@ -5894,6 +5933,8 @@ enqueue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 	int idle_h_nr_running = task_has_idle_policy(p);
 	int task_new = !(flags & ENQUEUE_WAKEUP);
 	int should_iowait_boost;
+
+	reset_bursted_cfs_rq(cfs_rq_of(se));
 
 	/*
 	 * The code below (indirectly) updates schedutil which looks at
@@ -7676,7 +7717,7 @@ static void set_last_buddy(struct sched_entity *se)
 	if (entity_is_task(se) && unlikely(task_has_idle_policy(task_of(se))))
 		return;
 
-	if ((se->cfs_rq && se->cfs_rq->boosted) || (se->my_q && se->my_q->boosted))
+	if ((se->cfs_rq && se->cfs_rq->bursted) || (se->my_q && se->my_q->bursted))
 		return;
 
 	for_each_sched_entity(se) {
@@ -7691,7 +7732,7 @@ static void set_next_buddy(struct sched_entity *se)
 	if (entity_is_task(se) && unlikely(task_has_idle_policy(task_of(se))))
 		return;
 	
-	if ((se->cfs_rq && se->cfs_rq->boosted) || (se->my_q && se->my_q->boosted))
+	if ((se->cfs_rq && se->cfs_rq->bursted) || (se->my_q && se->my_q->bursted))
 		return;
 
 	for_each_sched_entity(se) {
@@ -7757,17 +7798,8 @@ static void check_preempt_wakeup(struct rq *rq, struct task_struct *p, int wake_
 	    likely(!task_has_idle_policy(p)))
 		goto preempt;
 
-	if (cfs_rq->boosted && !cfs_rq_of(pse)->boosted) {
-		// todo
-		for_each_sched_entity(se) {
-			struct cfs_rq * cfs_rq = cfs_rq_of(se);
-			if(!cfs_rq->boosted)
-				break;
-			cfs_rq->runtime_remaining -= cfs_rq->runtime_boosted;
-			cfs_rq->runtime_boosted = 0;
-		}
+	if (cfs_rq->bursted && !cfs_rq_of(pse)->bursted)
 		goto preempt;
-	}
 
 	/*
 	 * Batch and idle tasks do not preempt non-idle tasks (their preemption
@@ -8349,7 +8381,7 @@ static int task_hot(struct task_struct *p, struct lb_env *env)
 	if (unlikely(task_has_idle_policy(p)))
 		return 0;
 
-	if (cfs_rq_of(&p->se)->boosted)
+	if (cfs_rq_of(&p->se)->bursted)
 		return 0;
 
 	/* SMT siblings share cache */

@@ -382,7 +382,7 @@ struct cfs_bandwidth {
 	struct hrtimer		slack_timer;
 	struct list_head	throttled_cfs_rq;
 
-	struct list_head	boosted_cfs_rq;
+	struct list_head	bursted_cfs_rq;
 
 	/* Statistics: */
 	int			nr_periods;
@@ -634,9 +634,10 @@ struct cfs_rq {
 	int			throttle_count;
 	struct list_head	throttled_list;
 	struct list_head	throttled_rq_list;
-	struct list_head	boosted_list;
+	struct list_head	boosted_list; // for cfs_b
+	struct list_head	boosted_rq_list; // for rq
 	s64			runtime_boosted;
-	int			boosted;
+	bool			bursted;
 #endif /* CONFIG_CFS_BANDWIDTH */
 
 	ANDROID_VENDOR_DATA_ARRAY(1, 16);
@@ -998,6 +999,8 @@ struct rq {
 
 #ifdef CONFIG_CFS_BANDWIDTH
 	struct list_head	throttled_cfs_rq;
+	struct list_head	bursted_cfs_rq;
+	u64			nr_bursted_cfs_rq;
 #endif /* CONFIG_CFS_BANDWIDTH */
 
 	/*

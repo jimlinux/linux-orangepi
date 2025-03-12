@@ -7658,6 +7658,8 @@ void __init sched_init(void)
 		init_tg_cfs_entry(&root_task_group, &rq->cfs, NULL, i, NULL);
 #ifdef CONFIG_CFS_BANDWIDTH
 		INIT_LIST_HEAD(&rq->throttled_cfs_rq);
+		INIT_LIST_HEAD(&rq->bursted_cfs_rq);
+		rq->nr_bursted_cfs_rq = 0;
 #endif /* CONFIG_CFS_BANDWIDTH */
 #endif /* CONFIG_FAIR_GROUP_SCHED */
 
