@@ -575,6 +575,7 @@ static inline int entity_before(struct sched_entity *a,
 
 // 主要功能：更新cfs_rq->min_vruntime
 // = max(cfs_rq->min_vruntime, min(curr->vruntime, leftmost_se->vruntime))
+// 注：curr不挂在rb tree上
 static void update_min_vruntime(struct cfs_rq *cfs_rq)
 {
 	struct sched_entity *curr = cfs_rq->curr;
@@ -4304,6 +4305,8 @@ place_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int initial)
 
 	/* sleeps up to a single latency don't count. */
 	// 2. wakeup进程，奖励，尽快执行
+	// 如果已经sleep了很久，可以尽快执行，因为下面还有：
+	// se->vruntime = max_vruntime(se->vruntime, vruntime);
 	if (!initial) {
 		unsigned long thresh = sysctl_sched_latency;
 
@@ -4311,6 +4314,7 @@ place_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int initial)
 		 * Halve their sleep time's effect, to allow
 		 * for a gentler effect of sleepers:
 		 */
+		// 默认开启
 		if (sched_feat(GENTLE_FAIR_SLEEPERS))
 			thresh >>= 1;
 
@@ -5909,8 +5913,8 @@ enqueue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 	if (should_iowait_boost)
 		cpufreq_update_util(rq, SCHED_CPUFREQ_IOWAIT);
 
-	// 1. 从p->se向上直到root group遍历enqueue
-	// 如果p->se的parent se->on_rq为false，说明parent se之前也dequeue了，这里也需要enqueue
+	// 1. 把se加入
+	// 如果p->se的parent 没有on_rq，说明parent se之前也dequeue了，这里也需要enqueue
 	for_each_sched_entity(se) {
 		// se已经on_rq，不需要enqueue，break
 		if (se->on_rq)
@@ -5929,7 +5933,7 @@ enqueue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 	}
 
 	trace_android_rvh_enqueue_task_fair(rq, p, flags);
-	// 2. 经过step1，enqueue之后，从se向上遍历到root group更新各种数据，如负载、权重
+	// 2. 经过step1，enqueue之后，从se继续向上遍历到root group更新各种数据，如负载、权重
 	for_each_sched_entity(se) {
 		cfs_rq = cfs_rq_of(se);
 
