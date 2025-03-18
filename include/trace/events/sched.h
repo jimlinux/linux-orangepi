@@ -627,6 +627,127 @@ TRACE_EVENT(sched_wake_idle_without_ipi,
 	TP_printk("cpu=%d", __entry->cpu)
 );
 
+TRACE_EVENT(sched_throttle_cfs_rq,
+
+	TP_PROTO(int cpu, int cgroup_id, bool bursted, u64 vruntime),
+
+	TP_ARGS(cpu, cgroup_id, bursted, vruntime),
+
+	TP_STRUCT__entry(
+		__field( int,	cpu	)
+		__field( int,	cgroup_id	)
+		__field( bool, bursted	)
+		__field( u64, vruntime	)
+	),
+
+	TP_fast_assign(
+		__entry->cpu	= cpu;
+		__entry->cgroup_id = cgroup_id;
+		__entry->bursted = bursted;
+		__entry->vruntime = vruntime;
+	),
+
+	TP_printk("cpu=[00%d] cgroup_id=%d se.bursted=%d, se.vruntime=%Lu", 
+		__entry->cpu, __entry->cgroup_id, __entry->bursted, (unsigned long long)__entry->vruntime)
+);
+
+TRACE_EVENT(sched_unthrottle_cfs_rq,
+
+	TP_PROTO(int cpu, int cgroup_id, bool bursted, u64 vruntime),
+
+	TP_ARGS(cpu, cgroup_id, bursted, vruntime),
+
+	TP_STRUCT__entry(
+		__field( int,	cpu	)
+		__field( int,	cgroup_id	)
+		__field( bool, bursted	)
+		__field( u64, vruntime	)
+	),
+
+	TP_fast_assign(
+		__entry->cpu	= cpu;
+		__entry->cgroup_id = cgroup_id;
+		__entry->bursted = bursted;
+		__entry->vruntime = vruntime;
+	),
+
+	TP_printk("cpu=[00%d] cgroup_id=%d se.bursted=%d, se.vruntime=%Lu", 
+		__entry->cpu, __entry->cgroup_id, __entry->bursted, (unsigned long long)__entry->vruntime)
+);
+
+TRACE_EVENT(sched_update_min_vruntime,
+
+	TP_PROTO(int cpu, bool curr_burst, bool left_burst, u64 curr_vruntime, u64 left_vruntime, u64 min_vruntime, u64 min_burst_vruntime),
+
+	TP_ARGS(cpu, curr_burst, left_burst, curr_vruntime, left_vruntime, min_vruntime, min_burst_vruntime),
+
+	TP_STRUCT__entry(
+		__field( int,	cpu	)
+		__field( bool,	curr_burst	)
+		__field( bool,	left_burst	)
+		__field( u64,	curr_vruntime	)
+		__field( u64,	left_vruntime	)
+		__field( u64,	min_vruntime	)
+		__field( u64,	min_burst_vruntime	)
+	),
+
+	TP_fast_assign(
+		__entry->cpu	= cpu;
+		__entry->curr_burst	= curr_burst;
+		__entry->left_burst	= left_burst;
+		__entry->curr_vruntime	= curr_vruntime;
+		__entry->left_vruntime = left_vruntime;
+		__entry->min_vruntime	= min_vruntime;
+		__entry->min_burst_vruntime = min_burst_vruntime;
+	),
+
+	TP_printk("cpu=[00%d], curr_burst=%d, left_burst=%d, curr.vruntime=%Lu left.vruntime=%Lu, min_vruntime=%Lu min_burst_vruntime=%Lu",
+			__entry->cpu,
+			__entry->curr_burst,
+			__entry->left_burst,
+			(unsigned long long)__entry->curr_vruntime, 
+			(unsigned long long)__entry->left_vruntime,
+			(unsigned long long)__entry->min_vruntime, 
+			(unsigned long long)__entry->min_burst_vruntime)
+);
+
+TRACE_EVENT(sched_do_boost,
+
+	TP_PROTO(int cpu),
+
+	TP_ARGS(cpu),
+
+	TP_STRUCT__entry(
+		__field( int,	cpu	)
+	),
+
+	TP_fast_assign(
+		__entry->cpu	= cpu;
+	),
+
+	TP_printk("cpu=[00%d]", __entry->cpu)
+);
+
+TRACE_EVENT(sched_reset_boost,
+
+	TP_PROTO(int cpu, u64 vruntime),
+
+	TP_ARGS(cpu, vruntime),
+
+	TP_STRUCT__entry(
+		__field( int ,	cpu	)
+		__field( u64,	vruntime	)
+	),
+
+	TP_fast_assign(
+		__entry->cpu	= cpu;
+		__entry->vruntime	= vruntime;
+	),
+
+	TP_printk("cpu=[00%d], se.vruntime=%Lu",
+		__entry->cpu, (unsigned long long)__entry->vruntime)
+);
+
 /*
  * Following tracepoints are not exported in tracefs and provide hooking
  * mechanisms only for testing and debugging purposes.
