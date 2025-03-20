@@ -5066,6 +5066,11 @@ static bool throttle_cfs_rq(struct cfs_rq *cfs_rq)
 		 */
 		dequeue = 0;
 	} else {
+		se = cfs_rq->tg->se[cpu_of(rq_of(cfs_rq))];
+		trace_sched_throttle_cfs_rq(cfs_rq, cpu_of(rq_of(cfs_rq)),
+				cfs_rq->tg->css.cgroup->kn->id,
+				cfs_rq->bursted, se->vruntime);
+
 		list_add_tail_rcu(&cfs_rq->throttled_list,
 				  &cfs_b->throttled_cfs_rq);
 		if(cfs_b->burst_idle) {
@@ -5157,6 +5162,10 @@ void unthrottle_cfs_rq(struct cfs_rq *cfs_rq)
 	reset_bursted_cfs_rq(cfs_rq);
 
 	se = cfs_rq->tg->se[cpu_of(rq)];
+
+	trace_sched_unthrottle_cfs_rq(cfs_rq, cpu_of(rq_of(cfs_rq)),
+ 							cfs_rq->tg->css.cgroup->kn->id,
+ 							cfs_rq->bursted, se->vruntime);
 
 	cfs_rq->throttled = 0;
 
@@ -5330,6 +5339,8 @@ static int do_sched_cfs_period_timer(struct cfs_bandwidth *cfs_b, int overrun, u
 			raw_spin_lock_irqsave(&cfs_b->lock, flags);
 			list_del_rcu(&cfs_rq->boosted_list);
 			raw_spin_unlock_irqrestore(&cfs_b->lock, flags);
+
+			trace_sched_reset_boost(cpu_of(rq), cfs_rq);
 		}
 		rq_unlock_irqrestore(rq, &rf);
 	}
@@ -5502,6 +5513,8 @@ static u64 distribute_cfs_runtime_boost(struct rq *cur_rq)
 	rcu_read_lock();
 	list_for_each_entry_rcu(cfs_rq, &cur_rq->throttled_cfs_rq,
 							throttled_rq_list) {
+		trace_sched_do_boost(cpu_of(cur_rq), cfs_rq);
+
 		struct cfs_bandwidth *cfs_b = tg_cfs_bandwidth(cfs_rq->tg);
 		/* confirm we're still not at a refresh boundary */
 		raw_spin_lock_irqsave(&cfs_b->lock, flags);

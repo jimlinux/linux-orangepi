@@ -627,6 +627,98 @@ TRACE_EVENT(sched_wake_idle_without_ipi,
 	TP_printk("cpu=%d", __entry->cpu)
 );
 
+TRACE_EVENT(sched_throttle_cfs_rq,
+
+	TP_PROTO(struct cfs_rq* cfs_rq, int cpu, int cgroup_id, bool bursted, u64 vruntime),
+
+	TP_ARGS(cfs_rq, cpu, cgroup_id, bursted, vruntime),
+
+	TP_STRUCT__entry(
+		__field( void*,	cfs_rq	)
+		__field( int,	cpu	)
+		__field( int,	cgroup_id	)
+		__field( bool, bursted	)
+		__field( u64, vruntime	)
+	),
+
+	TP_fast_assign(
+		__entry->cfs_rq	= (void *)cfs_rq;
+		__entry->cpu	= cpu;
+		__entry->cgroup_id = cgroup_id;
+		__entry->bursted = bursted;
+		__entry->vruntime = vruntime;
+	),
+
+	TP_printk("cfs_rq=%p, cpu=[00%d] cgroup_id=%d se.bursted=%d, se.vruntime=%Lu", 
+		__entry->cfs_rq, __entry->cpu, __entry->cgroup_id, __entry->bursted,
+		(unsigned long long)__entry->vruntime)
+);
+
+TRACE_EVENT(sched_unthrottle_cfs_rq,
+
+	TP_PROTO(struct cfs_rq* cfs_rq, int cpu, int cgroup_id, bool bursted, u64 vruntime),
+
+	TP_ARGS(cfs_rq, cpu, cgroup_id, bursted, vruntime),
+
+	TP_STRUCT__entry(
+		__field( void*,	cfs_rq	)
+		__field( int,	cpu	)
+		__field( int,	cgroup_id	)
+		__field( bool, bursted	)
+		__field( u64, vruntime	)
+	),
+
+	TP_fast_assign(
+		__entry->cfs_rq	= (void *)cfs_rq;
+		__entry->cpu	= cpu;
+		__entry->cgroup_id = cgroup_id;
+		__entry->bursted = bursted;
+		__entry->vruntime = vruntime;
+	),
+
+	TP_printk("cfs_rq=%p, cpu=[00%d] cgroup_id=%d se.bursted=%d, se.vruntime=%Lu", 
+		__entry->cfs_rq, __entry->cpu, __entry->cgroup_id, __entry->bursted,
+		(unsigned long long)__entry->vruntime)
+);
+
+TRACE_EVENT(sched_do_boost,
+
+	TP_PROTO(int cpu, struct cfs_rq* cfs_rq),
+
+	TP_ARGS(cpu, cfs_rq),
+
+	TP_STRUCT__entry(
+		__field( int,	cpu	)
+		__field( void*,	cfs_rq	)
+	),
+
+	TP_fast_assign(
+		__entry->cpu	= cpu;
+		__entry->cfs_rq	= (void *)cfs_rq;
+	),
+
+	TP_printk("cpu=[00%d], cfs_rq=%p", __entry->cpu, __entry->cfs_rq)
+);
+
+TRACE_EVENT(sched_reset_boost,
+
+	TP_PROTO(int cpu, struct cfs_rq* cfs_rq),
+
+	TP_ARGS(cpu, cfs_rq),
+
+	TP_STRUCT__entry(
+		__field( int,	cpu	)
+		__field( void*,	cfs_rq	)
+	),
+
+	TP_fast_assign(
+		__entry->cpu	= cpu;
+		__entry->cfs_rq	= (void *)cfs_rq;
+	),
+
+	TP_printk("cpu=[00%d], cfs_rq=%p", __entry->cpu, __entry->cfs_rq)
+);
+
 /*
  * Following tracepoints are not exported in tracefs and provide hooking
  * mechanisms only for testing and debugging purposes.
