@@ -589,10 +589,14 @@ enum page_entry_size {
  * to the functions called when a no-page or a wp-page exception occurs.
  */
 struct vm_operations_struct {
+	// 当指定的虚拟内存区域被加入到进程虚拟内存空间中时，open 函数会被调用
 	void (*open)(struct vm_area_struct * area);
+	// 当虚拟内存区域 VMA 从进程虚拟内存空间中被删除时，close 函数会被调用
 	void (*close)(struct vm_area_struct * area);
 	int (*split)(struct vm_area_struct * area, unsigned long addr);
 	int (*mremap)(struct vm_area_struct * area);
+	// 当进程访问虚拟内存时，访问的页面不在物理内存中，
+	// 可能是未分配物理内存也可能是被置换到磁盘中，这时就会产生缺页异常，fault 函数就会被调用
 	vm_fault_t (*fault)(struct vm_fault *vmf);
 	vm_fault_t (*huge_fault)(struct vm_fault *vmf,
 			enum page_entry_size pe_size);
@@ -602,6 +606,7 @@ struct vm_operations_struct {
 
 	/* notification that a previously read-only page is about to become
 	 * writable, if an error is returned it will cause a SIGBUS */
+	// 当一个只读的页面将要变为可写时，page_mkwrite 函数会被调用
 	vm_fault_t (*page_mkwrite)(struct vm_fault *vmf);
 
 	/* same as page_mkwrite when using VM_PFNMAP|VM_MIXEDMAP */

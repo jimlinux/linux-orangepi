@@ -307,8 +307,10 @@ struct vm_userfaultfd_ctx {};
  */
 struct vm_area_struct {
 	/* The first cache line has the info for VMA tree walking. */
-
+	// 区域范围：[vm_start，vm_end)
+	// 虚拟内存区域的起始地址, 包含
 	unsigned long vm_start;		/* Our start address within vm_mm. */
+	// 虚拟内存区域的结束地址 不包含
 	unsigned long vm_end;		/* The first byte after our end address
 					   within vm_mm. */
 
@@ -333,7 +335,9 @@ struct vm_area_struct {
 	 * Access permissions of this VMA.
 	 * See vmf_insert_mixed_prot() for discussion.
 	 */
+	// 虚拟内存区域的访问权限和行为规范
 	pgprot_t vm_page_prot;
+	// VM_READ，VM_WRITE，VM_EXEC 等定义虚拟内存区域是否可以被读取，写入，执行等权限
 	unsigned long vm_flags;		/* Flags, see mm.h. */
 
 	/*
@@ -360,14 +364,18 @@ struct vm_area_struct {
 	 */
 	struct list_head anon_vma_chain; /* Serialized by mmap_lock &
 					  * page_table_lock */
+	// 匿名映射
 	struct anon_vma *anon_vma;	/* Serialized by page_table_lock */
 
 	/* Function pointers to deal with this struct. */
+	// 虚拟内存区域 VMA 的相关操作的函数指针
 	const struct vm_operations_struct *vm_ops;
 
 	/* Information about our backing store: */
+	// 映射进虚拟内存中的文件内容，在文件中的偏移
 	unsigned long vm_pgoff;		/* Offset (within vm_file) in PAGE_SIZE
 					   units */
+	// 关联被映射的文件
 	struct file * vm_file;		/* File we map to (can be NULL). */
 	void * vm_private_data;		/* was vm_pte (shared mem) */
 
@@ -406,6 +414,7 @@ struct core_state {
 struct kioctx_table;
 struct mm_struct {
 	struct {
+		// 表示虚拟地址空间中的区域，如代码段、数据段等，放在这个list中
 		struct vm_area_struct *mmap;		/* list of VMAs */
 		struct rb_root mm_rb;
 		u64 vmacache_seqnum;                   /* per-thread vmacache */
@@ -417,6 +426,10 @@ struct mm_struct {
 				unsigned long addr, unsigned long len,
 				unsigned long pgoff, unsigned long flags);
 #endif
+		// 内存映射区的起始地址.
+		// 内存映射区内存地址的增长方向是由高地址向低地址增长
+		// 进程运行时所依赖的动态链接库中的代码段，数据段，
+		// BSS 段以及我们调用 mmap 映射出来的一段虚拟内存空间就保存在这个区域
 		unsigned long mmap_base;	/* base of mmap area */
 		unsigned long mmap_legacy_base;	/* base of mmap area in bottom-up allocations */
 #ifdef CONFIG_HAVE_ARCH_COMPAT_MMAP_BASES
@@ -424,6 +437,7 @@ struct mm_struct {
 		unsigned long mmap_compat_base;
 		unsigned long mmap_compat_legacy_base;
 #endif
+		// 虚拟地址空间地址上限 64位是128T
 		unsigned long task_size;	/* size of task vm space */
 		unsigned long highest_vm_end;	/* highest vma end address */
 		pgd_t * pgd;
@@ -500,11 +514,17 @@ struct mm_struct {
 		unsigned long hiwater_rss; /* High-watermark of RSS usage */
 		unsigned long hiwater_vm;  /* High-water virtual memory usage */
 
+		// 进程虚拟内存空间中总共与物理内存映射的页的总数
 		unsigned long total_vm;	   /* Total pages mapped */
+		// 被锁定不能换出的内存页总数
 		unsigned long locked_vm;   /* Pages that have PG_mlocked set */
+		// 既不能换出，也不能移动的内存页总数
 		atomic64_t    pinned_vm;   /* Refcount permanently increased */
+		// 数据段中映射的内存页数目
 		unsigned long data_vm;	   /* VM_WRITE & ~VM_SHARED & ~VM_STACK */
+		// 代码段中存放可执行文件的内存页数目
 		unsigned long exec_vm;	   /* VM_EXEC & ~VM_WRITE & ~VM_STACK */
+		// 栈中所映射的内存页数目
 		unsigned long stack_vm;	   /* VM_STACK */
 		unsigned long def_flags;
 
@@ -517,8 +537,15 @@ struct mm_struct {
 
 		spinlock_t arg_lock; /* protect the below fields */
 
+		// start_code ~ end_code 代码段地址范围
+		// start_data ~ end_data 数据段地址范围
 		unsigned long start_code, end_code, start_data, end_data;
+		// start_brk ~ brk 堆地址范围
+		// start_stack 栈底地址， 栈顶保存在sp寄存器
 		unsigned long start_brk, brk, start_stack;
+		// arg_start 和 arg_end 是参数列表的位置
+		// env_start, env_end 环境变量的位置
+		// 位于栈中最高地址处
 		unsigned long arg_start, arg_end, env_start, env_end;
 
 		unsigned long saved_auxv[AT_VECTOR_SIZE]; /* for /proc/PID/auxv */
