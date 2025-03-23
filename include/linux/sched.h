@@ -793,6 +793,7 @@ struct task_struct {
 	struct rb_node			pushable_dl_tasks;
 #endif
 
+	// 进程的用户虚拟地址空间
 	struct mm_struct		*mm;
 	struct mm_struct		*active_mm;
 

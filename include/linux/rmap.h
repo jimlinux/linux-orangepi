@@ -30,6 +30,7 @@
  * the anon_vma object itself: we're guaranteed no page can be
  * pointing to this anon_vma once its vma list is empty.
  */
+// vma和anon_vma基本是1对1关系，一个进程中临近的vma可能会共享一个anon_vma，但条件苛刻；
 struct anon_vma {
 	struct anon_vma *root;		/* Root of this anon_vma tree */
 	struct rw_semaphore rwsem;	/* W: modification, R: walking the list */
@@ -50,6 +51,7 @@ struct anon_vma {
 	 */
 	unsigned degree;
 
+	// 父子进程的anon_vma组成树关系
 	struct anon_vma *parent;	/* Parent of this anon_vma */
 
 	/*
@@ -62,6 +64,9 @@ struct anon_vma {
 	 */
 
 	/* Interval tree of private "related" vmas */
+	// 红黑树root，node是anon_vma_chain(avc)，树中avc.anon_vma都相同，avc.vma不同
+	// 表示1个anon_vma对多个vma
+	// 作用是通过page->mapping获取anon_vma，进而获取共享这个匿名page的所有vma
 	struct rb_root_cached rb_root;
 };
 
@@ -81,7 +86,11 @@ struct anon_vma {
 struct anon_vma_chain {
 	struct vm_area_struct *vma;
 	struct anon_vma *anon_vma;
+	// 挂入list：vm_area_struct.anon_vma_chain
+	// 一个vma对多个anon_vma
 	struct list_head same_vma;   /* locked by mmap_lock & page_table_lock */
+	// 挂入红黑树：anon_vma.rb_root
+	// 一个anon_vma对多个vma
 	struct rb_node rb;			/* locked by anon_vma->rwsem */
 	unsigned long rb_subtree_last;
 #ifdef CONFIG_DEBUG_VM_RB

@@ -315,8 +315,10 @@ struct vm_area_struct {
 					   within vm_mm. */
 
 	/* linked list of VM areas per task, sorted by address */
+	// 链表中上、下节点
 	struct vm_area_struct *vm_next, *vm_prev;
 
+	// rb node，用来挂入mm
 	struct rb_node vm_rb;
 
 	/*
@@ -329,6 +331,7 @@ struct vm_area_struct {
 
 	/* Second cache line starts here. */
 
+	// 此vma所属的mm虚拟地址空间
 	struct mm_struct *vm_mm;	/* The address space we belong to. */
 
 	/*
@@ -362,9 +365,11 @@ struct vm_area_struct {
 	 * can only be in the i_mmap tree.  An anonymous MAP_PRIVATE, stack
 	 * or brk vma (with NULL file) can only be in an anon_vma list.
 	 */
+	// 存储该 VMA 中所包含的所有匿名页 anon_vma
+	// 具体看结构体 anon_vma_chain
 	struct list_head anon_vma_chain; /* Serialized by mmap_lock &
 					  * page_table_lock */
-	// 匿名映射
+	// 用于快速判断 VMA 有没有匿名 page
 	struct anon_vma *anon_vma;	/* Serialized by page_table_lock */
 
 	/* Function pointers to deal with this struct. */
@@ -414,9 +419,9 @@ struct core_state {
 struct kioctx_table;
 struct mm_struct {
 	struct {
-		// 表示虚拟地址空间中的区域，如代码段、数据段等，放在这个list中
+		// list head,用来挂入vma
 		struct vm_area_struct *mmap;		/* list of VMAs */
-		struct rb_root mm_rb;
+		struct rb_root mm_rb; // 红黑树root，用来挂入vma
 		u64 vmacache_seqnum;                   /* per-thread vmacache */
 #ifdef CONFIG_SPECULATIVE_PAGE_FAULT
 		rwlock_t mm_rb_lock;
