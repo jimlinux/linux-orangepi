@@ -86,7 +86,10 @@ struct page {
 			 */
 			struct list_head lru;
 			/* See page-flags.h for PAGE_MAPPING_FLAGS */
+			// 如page表示匿名页，mapping指向anno_vma
 			struct address_space *mapping;
+			// 如page为匿名页，表示该页在​虚拟内存区域（VMA）中的偏移量，以​页为单位
+			// 如page为文件映射页：表示该页在​文件中的偏移量，以​页为单位​（即对应文件内的第N页，N = index）
 			pgoff_t index;		/* Our offset within mapping. */
 			/**
 			 * @private: Mapping-private opaque data.
@@ -305,12 +308,12 @@ struct vm_userfaultfd_ctx {};
  * space that has a special rule for the page-fault handlers (ie a shared
  * library, the executable area etc).
  */
+// 映射区，范围：[vm_start，vm_end)
 struct vm_area_struct {
 	/* The first cache line has the info for VMA tree walking. */
-	// 区域范围：[vm_start，vm_end)
-	// 虚拟内存区域的起始地址, 包含
+	// 映射区的起始地址, 包含
 	unsigned long vm_start;		/* Our start address within vm_mm. */
-	// 虚拟内存区域的结束地址 不包含
+	// 映射区的结束地址 不包含
 	unsigned long vm_end;		/* The first byte after our end address
 					   within vm_mm. */
 
@@ -377,7 +380,10 @@ struct vm_area_struct {
 	const struct vm_operations_struct *vm_ops;
 
 	/* Information about our backing store: */
-	// 映射进虚拟内存中的文件内容，在文件中的偏移
+	// 对于文件映射vma，vm_pgoff偏移，表示从文件中多少页开始映射。单位是页
+	// 对于匿名映射vm_pgoff无实际意义，但通常用来记录：
+	// 	privet匿名：vm_pgoff = vm_start / page_size  refer：insert_vm_struct
+	// 	shared匿名：vm_pgoff=0
 	unsigned long vm_pgoff;		/* Offset (within vm_file) in PAGE_SIZE
 					   units */
 	// 关联被映射的文件
@@ -445,7 +451,7 @@ struct mm_struct {
 		// 虚拟地址空间地址上限 64位是128T
 		unsigned long task_size;	/* size of task vm space */
 		unsigned long highest_vm_end;	/* highest vma end address */
-		pgd_t * pgd;
+		pgd_t * pgd; // 页全局目录 context_switch时传给寄存器，由硬件完成查询pgd->pmd->pte
 
 #ifdef CONFIG_MEMBARRIER
 		/**

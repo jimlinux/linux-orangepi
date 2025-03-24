@@ -1054,6 +1054,8 @@ void page_move_anon_rmap(struct page *page, struct vm_area_struct *vma)
  * @address:	User virtual address of the mapping	
  * @exclusive:	the page is exclusively owned by the current process
  */
+// 设置page->mapping = anon_vma
+// 设置page->index
 static void __page_set_anon_rmap(struct page *page,
 	struct vm_area_struct *vma, unsigned long address, int exclusive)
 {
@@ -1950,6 +1952,7 @@ out:
  * vm_flags for that VMA.  That should be OK, because that vma shouldn't be
  * LOCKED.
  */
+// caller： try_to_unmap
 static void rmap_walk_anon(struct page *page, struct rmap_walk_control *rwc,
 		bool locked)
 {

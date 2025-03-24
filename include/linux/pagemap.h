@@ -547,13 +547,23 @@ static inline loff_t page_file_offset(struct page *page)
 extern pgoff_t linear_hugepage_index(struct vm_area_struct *vma,
 				     unsigned long address);
 
+/*
+__handle_mm_fault
+handle_pte_fault
+	do_anonymous_page
+		__page_add_new_anon_rmap
+			__page_set_anon_rmap
+				page->index = linear_page_index(vma, address);
+*/
 static inline pgoff_t linear_page_index(struct vm_area_struct *vma,
 					unsigned long address)
 {
 	pgoff_t pgoff;
 	if (unlikely(is_vm_hugetlb_page(vma)))
 		return linear_hugepage_index(vma, address);
+	// 相对于vma->vm_start的偏移, 以page为单位
 	pgoff = (address - READ_ONCE(vma->vm_start)) >> PAGE_SHIFT;
+	// 需要加上vma->vm_pgoff, vma->vm_pgoff=vma->vm_start/page_size
 	pgoff += READ_ONCE(vma->vm_pgoff);
 	return pgoff;
 }
