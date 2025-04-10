@@ -3927,6 +3927,7 @@ skip_pmd_checks:
 	}
 
 	/* Allocate our own private page. */
+	// 准备anon_vma
 	if (unlikely(anon_vma_prepare(vma)))
 		goto oom;
 	page = alloc_zeroed_user_highpage_movable(vma, vmf->address);

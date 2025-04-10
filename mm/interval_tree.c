@@ -72,6 +72,10 @@ INTERVAL_TREE_DEFINE(struct anon_vma_chain, rb, unsigned long, rb_subtree_last,
 		     avc_start_pgoff, avc_last_pgoff,
 		     static inline, __anon_vma_interval_tree)
 
+// 把avc作为node插入interval tree（区间树）
+// node的value区间(avc->vma->pgoff, avc->vma->pgoff + (vma->vm_end - vma->vm_start) >> PAGE_SHIFT)
+// 也就是start=avc->vma->vm_start/page_size
+// 		  last=avc->vma->vm_end/page_size)
 void anon_vma_interval_tree_insert(struct anon_vma_chain *node,
 				   struct rb_root_cached *root)
 {
@@ -79,6 +83,7 @@ void anon_vma_interval_tree_insert(struct anon_vma_chain *node,
 	node->cached_vma_start = avc_start_pgoff(node);
 	node->cached_vma_last = avc_last_pgoff(node);
 #endif
+	// 定义在interval_tree_generic.h
 	__anon_vma_interval_tree_insert(node, root);
 }
 
@@ -88,6 +93,9 @@ void anon_vma_interval_tree_remove(struct anon_vma_chain *node,
 	__anon_vma_interval_tree_remove(node, root);
 }
 
+// 在树中查找与（first，last）有交集的第一个node
+// 例如rmap_walk_anon中
+// 查询(page->index, page->index)所在的第一个avc
 struct anon_vma_chain *
 anon_vma_interval_tree_iter_first(struct rb_root_cached *root,
 				  unsigned long first, unsigned long last)
@@ -95,6 +103,7 @@ anon_vma_interval_tree_iter_first(struct rb_root_cached *root,
 	return __anon_vma_interval_tree_iter_first(root, first, last);
 }
 
+// 在树中查找与（first，last）有交集的下一个node
 struct anon_vma_chain *
 anon_vma_interval_tree_iter_next(struct anon_vma_chain *node,
 				 unsigned long first, unsigned long last)

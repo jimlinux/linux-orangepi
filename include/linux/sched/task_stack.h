@@ -36,6 +36,10 @@ static inline unsigned long *end_of_stack(const struct task_struct *task)
 
 #define task_stack_page(task)	((void *)(task)->stack)
 
+// 设置thread_info
+// 1. thread_info在内核栈的低地址
+// 2. 拷贝org的thread_info
+// 3. 设置thread_info->task=p;
 static inline void setup_thread_stack(struct task_struct *p, struct task_struct *org)
 {
 	*task_thread_info(p) = *task_thread_info(org);

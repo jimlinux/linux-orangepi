@@ -217,8 +217,10 @@ static int free_vm_stack_cache(unsigned int cpu)
 }
 #endif
 
+// 内核栈大小=page size * 2^THREAD_SIZE_ORDER
 static unsigned long *alloc_thread_stack_node(struct task_struct *tsk, int node)
 {
+// 用vmalloc分配内核栈，内核栈内存可以不连续
 #ifdef CONFIG_VMAP_STACK
 	void *stack;
 	int i;
@@ -359,6 +361,7 @@ struct vm_area_struct *vm_area_alloc(struct mm_struct *mm)
 
 struct vm_area_struct *vm_area_dup(struct vm_area_struct *orig)
 {
+	// new 一个新的vma
 	struct vm_area_struct *new = kmem_cache_alloc(vm_area_cachep, GFP_KERNEL);
 
 	if (new) {
@@ -368,6 +371,7 @@ struct vm_area_struct *vm_area_dup(struct vm_area_struct *orig)
 		 * orig->shared.rb may be modified concurrently, but the clone
 		 * will be reinitialized.
 		 */
+		// 拷贝old过来
 		*new = data_race(*orig);
 		INIT_VMA(new);
 		new->vm_next = new->vm_prev = NULL;
@@ -499,6 +503,7 @@ static __latent_entropy int dup_mmap(struct mm_struct *mm,
 	/* No ordering required: file already has been exposed. */
 	RCU_INIT_POINTER(mm->exe_file, get_mm_exe_file(oldmm));
 
+	// 1. 拷贝vm统计数据
 	mm->total_vm = oldmm->total_vm;
 	mm->data_vm = oldmm->data_vm;
 	mm->exec_vm = oldmm->exec_vm;
@@ -514,6 +519,7 @@ static __latent_entropy int dup_mmap(struct mm_struct *mm,
 	if (retval)
 		goto out;
 
+	// 遍历oldmm vma，拷贝全部vma
 	prev = NULL;
 	for (mpnt = oldmm->mmap; mpnt; mpnt = mpnt->vm_next) {
 		struct file *file;
@@ -538,6 +544,7 @@ static __latent_entropy int dup_mmap(struct mm_struct *mm,
 				goto fail_nomem;
 			charge = len;
 		}
+		// dup vma
 		tmp = vm_area_dup(mpnt);
 		if (!tmp)
 			goto fail_nomem;
@@ -555,7 +562,7 @@ static __latent_entropy int dup_mmap(struct mm_struct *mm,
 			 * copy page for current vma.
 			 */
 			tmp->anon_vma = NULL;
-		} else if (anon_vma_fork(tmp, mpnt))
+		} else if (anon_vma_fork(tmp, mpnt)) // 建立大厦
 			goto fail_nomem_anon_vma_fork;
 		tmp->vm_flags &= ~(VM_LOCKED | VM_LOCKONFAULT);
 		file = tmp->vm_file;
@@ -892,10 +899,12 @@ static struct task_struct *dup_task_struct(struct task_struct *orig, int node)
 
 	if (node == NUMA_NO_NODE)
 		node = tsk_fork_get_node(orig);
+	// 1. slab分配一个new task_struct对象
 	tsk = alloc_task_struct_node(node);
 	if (!tsk)
 		return NULL;
 
+	// 2. 分配进程的内核栈，tsk，thread都有各自的内核栈
 	stack = alloc_thread_stack_node(tsk, node);
 	if (!stack)
 		goto free_tsk;
@@ -903,8 +912,10 @@ static struct task_struct *dup_task_struct(struct task_struct *orig, int node)
 	if (memcg_charge_kernel_stack(tsk))
 		goto free_stack;
 
+	// 内核栈的vma
 	stack_vm_area = task_stack_vm_area(tsk);
 
+	// 从orig tsk拷贝到new tsk
 	err = arch_dup_task_struct(tsk, orig);
 
 	/*
@@ -936,8 +947,10 @@ static struct task_struct *dup_task_struct(struct task_struct *orig, int node)
 	 */
 	tsk->seccomp.filter = NULL;
 #endif
-
+	// 3. 设置 tsk的thread_info
 	setup_thread_stack(tsk, orig);
+
+	// 4. 其他初始化
 	clear_user_return_notifier(tsk);
 	clear_tsk_need_resched(tsk);
 	set_task_stack_end_magic(tsk);
@@ -1050,6 +1063,7 @@ static void mm_init_uprobes_state(struct mm_struct *mm)
 static struct mm_struct *mm_init(struct mm_struct *mm, struct task_struct *p,
 	struct user_namespace *user_ns)
 {
+	// 各种初始化
 	mm->mmap = NULL;
 	mm->mm_rb = RB_ROOT;
 	mm->vmacache_seqnum = 0;
@@ -1092,6 +1106,7 @@ static struct mm_struct *mm_init(struct mm_struct *mm, struct task_struct *p,
 		mm->def_flags = 0;
 	}
 
+	// 分配pgd对象
 	if (mm_alloc_pgd(mm))
 		goto fail_nopgd;
 
@@ -1402,16 +1417,19 @@ static struct mm_struct *dup_mm(struct task_struct *tsk,
 {
 	struct mm_struct *mm;
 	int err;
-
+	// 1. slab分配一个mm结构体对象
 	mm = allocate_mm();
 	if (!mm)
 		goto fail_nomem;
 
+	// 2. 直接拷贝过来
 	memcpy(mm, oldmm, sizeof(*mm));
 
+	// 3. 初始化
 	if (!mm_init(mm, tsk, mm->user_ns))
 		goto fail_nomem;
 
+	// 4. 重点：拷贝oldmm
 	err = dup_mmap(mm, oldmm);
 	if (err)
 		goto free_pt;
@@ -1461,6 +1479,7 @@ static int copy_mm(unsigned long clone_flags, struct task_struct *tsk)
 	/* initialize the new vmacache entries */
 	vmacache_flush(tsk);
 
+	// 1. 如果是thread，则指向同一个mm
 	if (clone_flags & CLONE_VM) {
 		mmget(oldmm);
 		mm = oldmm;
@@ -1468,6 +1487,7 @@ static int copy_mm(unsigned long clone_flags, struct task_struct *tsk)
 	}
 
 	retval = -ENOMEM;
+	// 2. 创建mm，然后从orig拷贝过来
 	mm = dup_mm(tsk, current->mm);
 	if (!mm)
 		goto fail_nomem;
@@ -1914,9 +1934,11 @@ static __latent_entropy struct task_struct *copy_process(
 	 * Don't allow sharing the root directory with processes in a different
 	 * namespace
 	 */
+	// 不同mount namespace，不能share root
 	if ((clone_flags & (CLONE_NEWNS|CLONE_FS)) == (CLONE_NEWNS|CLONE_FS))
 		return ERR_PTR(-EINVAL);
 
+	// 不同user namespace，不能share root
 	if ((clone_flags & (CLONE_NEWUSER|CLONE_FS)) == (CLONE_NEWUSER|CLONE_FS))
 		return ERR_PTR(-EINVAL);
 
@@ -1924,6 +1946,7 @@ static __latent_entropy struct task_struct *copy_process(
 	 * Thread groups must share signals as well, and detached threads
 	 * can only be started up within the thread group.
 	 */
+	// 线程必须share signal handle
 	if ((clone_flags & CLONE_THREAD) && !(clone_flags & CLONE_SIGHAND))
 		return ERR_PTR(-EINVAL);
 
@@ -1932,6 +1955,7 @@ static __latent_entropy struct task_struct *copy_process(
 	 * thread groups also imply shared VM. Blocking this case allows
 	 * for various simplifications in other code.
 	 */
+	// share signal handler 需要share vm
 	if ((clone_flags & CLONE_SIGHAND) && !(clone_flags & CLONE_VM))
 		return ERR_PTR(-EINVAL);
 
@@ -1949,6 +1973,7 @@ static __latent_entropy struct task_struct *copy_process(
 	 * If the new process will be in a different pid or user namespace
 	 * do not allow it to share a thread group with the forking task.
 	 */
+	// 线程组中线程，必须在同一ns中
 	if (clone_flags & CLONE_THREAD) {
 		if ((clone_flags & (CLONE_NEWUSER | CLONE_NEWPID)) ||
 		    (task_active_pid_ns(current) != nsp->pid_ns_for_children))
@@ -1993,6 +2018,7 @@ static __latent_entropy struct task_struct *copy_process(
 		goto fork_out;
 
 	retval = -ENOMEM;
+	// 1. dump task_struce结构体
 	p = dup_task_struct(current, node);
 	if (!p)
 		goto fork_out;
@@ -2093,6 +2119,7 @@ static __latent_entropy struct task_struct *copy_process(
 
 	p->io_context = NULL;
 	audit_set_context(p, NULL);
+	// 2. 初始化p的cgroup相关
 	cgroup_fork(p);
 #ifdef CONFIG_NUMA
 	p->mempolicy = mpol_dup(p->mempolicy);
@@ -2130,6 +2157,7 @@ static __latent_entropy struct task_struct *copy_process(
 #endif
 
 	/* Perform scheduler related setup. Assign this task to a CPU. */
+	// 3. 初始化sched相关的数据
 	retval = sched_fork(clone_flags, p);
 	if (retval)
 		goto bad_fork_cleanup_policy;
@@ -2145,6 +2173,9 @@ static __latent_entropy struct task_struct *copy_process(
 	retval = security_task_alloc(p, clone_flags);
 	if (retval)
 		goto bad_fork_cleanup_audit;
+
+	// 4. 拷贝各种资源
+
 	retval = copy_semundo(clone_flags, p);
 	if (retval)
 		goto bad_fork_cleanup_security;
@@ -2160,6 +2191,8 @@ static __latent_entropy struct task_struct *copy_process(
 	retval = copy_signal(clone_flags, p);
 	if (retval)
 		goto bad_fork_cleanup_sighand;
+
+	// 4.1 拷贝用户空间的虚拟地址空间
 	retval = copy_mm(clone_flags, p);
 	if (retval)
 		goto bad_fork_cleanup_signal;
@@ -2554,6 +2587,7 @@ pid_t kernel_clone(struct kernel_clone_args *args)
 			trace = 0;
 	}
 
+	// 分配task_struct  拷贝task相关的一切资源
 	p = copy_process(NULL, trace, NUMA_NO_NODE, args);
 	add_latent_entropy();
 

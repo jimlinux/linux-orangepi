@@ -89,9 +89,10 @@ struct anon_vma_chain {
 	// 挂入list：vm_area_struct.anon_vma_chain
 	// 一个vma对多个anon_vma
 	struct list_head same_vma;   /* locked by mmap_lock & page_table_lock */
-	// 挂入红黑树：anon_vma.rb_root
-	// 一个anon_vma对多个vma
+	// 挂入区间树（rbtree实现）：anon_vma.rb_root，一个anon_vma对多个vma
 	struct rb_node rb;			/* locked by anon_vma->rwsem */
+	// 以该节点为根的子树中所有区间的最大结束地址
+	// 主要用于优化查询：通过比较目标区间与节点的 subtree_last，快速剪枝无需遍历的子树
 	unsigned long rb_subtree_last;
 #ifdef CONFIG_DEBUG_VM_RB
 	unsigned long cached_vma_start, cached_vma_last;
