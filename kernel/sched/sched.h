@@ -547,8 +547,6 @@ struct cfs_rq {
 #ifndef CONFIG_64BIT
 	u64			min_vruntime_copy;
 #endif
-	u64			min_burst_vruntime;
-	struct sched_entity	*leftmost_burst;
 
 	// 就绪队列root
 	// 注意：
@@ -1020,8 +1018,6 @@ struct rq {
 	unsigned int		clock_update_flags;
 	u64			clock;
 	/* Ensure that all clocks are in the same cache line */
-	// clock_task、clock_pelt、lost_idle_time在同一个缓存行，clock在前一个
-	// 单位：ns 纳秒
 	u64			clock_task ____cacheline_aligned;
 	u64			clock_pelt;
 	unsigned long		lost_idle_time;

@@ -573,16 +573,6 @@ static inline int entity_before(struct sched_entity *a,
 	return (s64)(a->vruntime - b->vruntime) < 0;
 }
 
-static inline bool is_bursted(struct sched_entity *se) {
-	if (se->my_q && se->my_q->boosted && !se->cfs_rq->boosted)
-		return true;
-	else
-		return false;
-}
-
-static struct sched_entity *__pick_next_entity(struct sched_entity *se);
-static struct sched_entity *__pick_prev_entity(struct sched_entity *se);
-
 // 主要功能：更新cfs_rq->min_vruntime
 // = max(cfs_rq->min_vruntime, min(curr->vruntime, leftmost_se->vruntime))
 // 注：curr不挂在rb tree上
@@ -596,15 +586,10 @@ static void update_min_vruntime(struct cfs_rq *cfs_rq)
 	u64 left_vruntime = 0;
 
 	u64 vruntime = cfs_rq->min_vruntime;
-	u64 burst_vruntime = cfs_rq->min_burst_vruntime;
 
 	if (curr) {
-		if (curr->on_rq) {
-			if (is_bursted(curr))
-				burst_vruntime = curr->vruntime;
-			else
-				vruntime = curr->vruntime;
-		}
+		if (curr->on_rq)
+			vruntime = curr->vruntime;
 		else
 			curr = NULL;
 	}
@@ -613,29 +598,10 @@ static void update_min_vruntime(struct cfs_rq *cfs_rq)
 		struct sched_entity *se;
 		se = rb_entry(leftmost, struct sched_entity, run_node);
 
-		if (!curr) { // called by dequeue
-			// R{}, Q{A,B}
-			// R{}, Q{X, Y, A, B}
-			if(se != cfs_rq->leftmost_burst) { // Q have X,Y
-				vruntime = se->vruntime;
-			}
-			if (cfs_rq->leftmost_burst) { // Q have AB
-				burst_vruntime = cfs_rq->leftmost_burst->vruntime;
-			}
-		} else { // called by update_curr
-			// AB:bursted, XY:non-bursted, R-runinng Q-in rbtree
-			// R{A}, Q{B}
-			// R{A}, Q{X, Y, B}
-			// R{X}, Q{A, B}
-			// R{X}, Q{Y, A, B}
-			if(se != cfs_rq->leftmost_burst) { // Q have X,Y
-				vruntime = min_vruntime(vruntime, se->vruntime);
-			}
-			if (cfs_rq->leftmost_burst) { // Q have AB
-				burst_vruntime = min_vruntime(burst_vruntime,
-					cfs_rq->leftmost_burst->vruntime);
-			}
-		}
+		if (!curr)
+			vruntime = se->vruntime;
+		else
+			vruntime = min_vruntime(vruntime, se->vruntime);
 	}
 
 	/* ensure we never gain time by being placed backwards. */
@@ -644,25 +610,6 @@ static void update_min_vruntime(struct cfs_rq *cfs_rq)
 	smp_wmb();
 	cfs_rq->min_vruntime_copy = cfs_rq->min_vruntime;
 #endif
-	cfs_rq->min_burst_vruntime = max_vruntime(cfs_rq->min_burst_vruntime, burst_vruntime);
-
-	if ((curr && is_bursted(curr))) {
-		curr_burst = true;
-		curr_vruntime = curr->vruntime;
-	}
-	if (leftmost) {
-		struct sched_entity *se;
-		se = rb_entry(leftmost, struct sched_entity, run_node);
-		if (is_bursted(se)) {
-			left_burst = true;
-		}
-		left_vruntime = se->vruntime;
-	}
-	if (curr_burst || left_burst)
-		trace_sched_update_min_vruntime(cpu_of(rq_of(cfs_rq)),
-					curr_burst, left_burst,
-					curr_vruntime, left_vruntime,
-					cfs_rq->min_vruntime, cfs_rq->min_burst_vruntime);
 }
 
 /*
@@ -698,13 +645,6 @@ static void __enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 	rb_link_node(&se->run_node, parent, link);
 	rb_insert_color_cached(&se->run_node,
 			       &cfs_rq->tasks_timeline, leftmost);
-
-	if (is_bursted(se)) {
-		struct sched_entity *prev = __pick_prev_entity(se);
-		if (!prev || !is_bursted(prev)) {
-			cfs_rq->leftmost_burst = se;
-		}
-	}
 }
 
 // 把se从rbtree删除
@@ -712,10 +652,6 @@ static void __dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
 	trace_android_rvh_dequeue_entity(cfs_rq, se);
 	rb_erase_cached(&se->run_node, &cfs_rq->tasks_timeline);
-
-	if (cfs_rq->leftmost_burst == se) {
-		cfs_rq->leftmost_burst = __pick_next_entity(se);
-	}
 }
 
 struct sched_entity *__pick_first_entity(struct cfs_rq *cfs_rq)
@@ -736,16 +672,6 @@ static struct sched_entity *__pick_next_entity(struct sched_entity *se)
 		return NULL;
 
 	return rb_entry(next, struct sched_entity, run_node);
-}
-
-static struct sched_entity *__pick_prev_entity(struct sched_entity *se)
-{
-	struct rb_node *prev = rb_prev(&se->run_node);
-
-	if (!prev)
-		return NULL;
-
-	return rb_entry(prev, struct sched_entity, run_node);
 }
 
 #ifdef CONFIG_SCHED_DEBUG
@@ -4370,9 +4296,6 @@ static void
 place_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int initial)
 {
 	u64 vruntime = cfs_rq->min_vruntime;
-	if(is_bursted(se)) {
-		vruntime = cfs_rq->min_burst_vruntime;
-	}
 
 	/*
 	 * The 'current' period is already promised to the current tasks,
@@ -4386,7 +4309,7 @@ place_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int initial)
 
 	/* sleeps up to a single latency don't count. */
 	// 2. wakeup进程，奖励，尽快执行
-	// 如果已经sleep了很久，可以尽快执行，但不能长期执行，因为下面还有：
+	// 如果已经sleep了很久，可以尽快执行，因为下面还有：
 	// se->vruntime = max_vruntime(se->vruntime, vruntime);
 	if (!initial) {
 		unsigned long thresh = sysctl_sched_latency;
@@ -5389,20 +5312,9 @@ static int do_sched_cfs_period_timer(struct cfs_bandwidth *cfs_b, int overrun, u
 		rq_lock_irqsave(rq, &rf);
 		// must check boosted flag, maybe alreday del in throttle_cfs_rq
 		if(cfs_rq->boosted) {
-			struct sched_entity *se = cfs_rq->tg->se[cpu_of(rq)];
-			if (is_bursted(se)) {
-				se->vruntime = se->vruntime - se->cfs_rq->min_burst_vruntime
-					+ se->cfs_rq->min_vruntime;
-				if (se->cfs_rq->curr != se && se->on_rq) {
-					__dequeue_entity(se->cfs_rq, se);
-					__enqueue_entity(se->cfs_rq, se);
-				}
-				trace_sched_reset_boost(cpu_of(rq), se->vruntime);
-			}
 			set_burst_state(cfs_rq, 0);
 			cfs_rq->runtime_remaining -= cfs_rq->runtime_boosted;
 			cfs_rq->runtime_boosted = 0;
-
 			raw_spin_lock_irqsave(&cfs_b->lock, flags);
 			list_del_rcu(&cfs_rq->boosted_list);
 			raw_spin_unlock_irqrestore(&cfs_b->lock, flags);
@@ -5580,9 +5492,7 @@ static u64 distribute_cfs_runtime_boost(struct rq *cur_rq)
 	rcu_read_lock();
 	list_for_each_entry_rcu(cfs_rq, &cur_rq->throttled_cfs_rq,
 							throttled_rq_list) {
-		struct sched_entity *se = cfs_rq->tg->se[cpu_of(cur_rq)];
 		struct cfs_bandwidth *cfs_b = tg_cfs_bandwidth(cfs_rq->tg);
-
 		/* confirm we're still not at a refresh boundary */
 		raw_spin_lock_irqsave(&cfs_b->lock, flags);
 		if (runtime_refresh_within(cfs_b, min_bandwidth_expiration)
@@ -6045,7 +5955,6 @@ enqueue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 		if (cfs_rq_throttled(cfs_rq))
 			goto enqueue_throttle;
 
-		// group se的enqueue都用wakeup
 		flags = ENQUEUE_WAKEUP;
 	}
 
@@ -7878,6 +7787,14 @@ static void check_preempt_wakeup(struct rq *rq, struct task_struct *p, int wake_
 		goto preempt;
 
 	if (cfs_rq->boosted && !cfs_rq_of(pse)->boosted) {
+		// todo
+		for_each_sched_entity(se) {
+			struct cfs_rq * cfs_rq = cfs_rq_of(se);
+			if(!cfs_rq->boosted)
+				break;
+			cfs_rq->runtime_remaining -= cfs_rq->runtime_boosted;
+			cfs_rq->runtime_boosted = 0;
+		}
 		goto preempt;
 	}
 
@@ -8109,13 +8026,13 @@ idle:
 
 burst:
 #ifdef CONFIG_CFS_BANDWIDTH
-	u64 cost, t0 = sched_clock_cpu(rq->cpu);
+	u64 t0 = sched_clock_cpu(rq->cpu);
 	rq->burst_idle_stamp = rq_clock(rq);
 	throttled = !list_empty(&rq->throttled_cfs_rq);
 	if(throttled) {
 		u64 total_runtime;
 		total_runtime = distribute_cfs_runtime_boost(rq);
-		cost = sched_clock_cpu(rq->cpu) - t0;
+		u64 cost = sched_clock_cpu(rq->cpu) - t0;
 		if (rq->burst_max_cost < cost)
 			rq->burst_max_cost = cost;
 		// printk("zjm cpu=%d cost=%d, burst_max_cost=%d, burst_avg_idle=%d",
@@ -12462,8 +12379,6 @@ void init_cfs_rq(struct cfs_rq *cfs_rq)
 #ifndef CONFIG_64BIT
 	cfs_rq->min_vruntime_copy = cfs_rq->min_vruntime;
 #endif
-	cfs_rq->min_burst_vruntime = (u64)(-(1LL << 20));
-	cfs_rq->leftmost_burst = NULL;
 #ifdef CONFIG_SMP
 	raw_spin_lock_init(&cfs_rq->removed.lock);
 #endif
