@@ -7674,6 +7674,9 @@ static void migrate_task_rq_fair(struct task_struct *p, int new_cpu)
 		u64 min_vruntime;
 
 #ifndef CONFIG_64BIT
+		// why ?
+		// 在32bit机器上，对64位数据赋值是非atomic的，需要两次内存操作
+		// 下面用两个变量来确保读到的与写入的数据一致； 顺序锁？
 		u64 min_vruntime_copy;
 
 		do {

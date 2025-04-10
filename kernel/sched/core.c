@@ -2706,7 +2706,7 @@ ttwu_stat(struct task_struct *p, int cpu, int wake_flags)
 /*
  * Mark the task runnable and perform wakeup-preemption.
  */
-// 之前已经p放在就绪队列了，
+// 之前已经把p放在就绪队列了，
 // 此函数的功能：
 // 1. check p是否抢占curr
 // 2. 设置p state为TASK_RUNNING，表示唤醒已结束；
@@ -2714,7 +2714,9 @@ ttwu_stat(struct task_struct *p, int cpu, int wake_flags)
 static void ttwu_do_wakeup(struct rq *rq, struct task_struct *p, int wake_flags,
 			   struct rq_flags *rf)
 {
+	// 1. check p是否需要抢占curr
 	check_preempt_curr(rq, p, wake_flags);
+	// 2. 设置p state为TASK_RUNNING
 	p->state = TASK_RUNNING;
 	trace_sched_wakeup(p);
 
@@ -2924,6 +2926,7 @@ static inline bool ttwu_queue_cond(int cpu, int wake_flags)
 	 * If the CPU does not share cache, then queue the task on the
 	 * remote rqs wakelist to avoid accessing remote data.
 	 */
+	// 唤醒者cpu与被唤醒者cpu 不共享缓存
 	if (!cpus_share_cache(smp_processor_id(), cpu))
 		return true;
 
@@ -2981,6 +2984,7 @@ static void ttwu_queue(struct task_struct *p, int cpu, int wake_flags)
 	if (ttwu_queue_wakelist(p, cpu, wake_flags))
 		return;
 
+	// 后续要操作rq了，加锁
 	rq_lock(rq, &rf);
 	update_rq_clock(rq);
 	ttwu_do_activate(rq, p, wake_flags, &rf);
@@ -3108,6 +3112,7 @@ static void ttwu_queue(struct task_struct *p, int cpu, int wake_flags)
  *	   %false otherwise.
  */
 // 尝试唤醒task p
+// 调用者可能是中断，或者另一个进程，调用者cpu可能跟之前p所在cpu不同；
 static int
 try_to_wake_up(struct task_struct *p, unsigned int state, int wake_flags)
 {
@@ -3115,7 +3120,7 @@ try_to_wake_up(struct task_struct *p, unsigned int state, int wake_flags)
 	int cpu, success = 0;
 
 	preempt_disable();
-	// p正在运行？ 可能是被中断唤醒，直接置为TASK_RUNNING即可
+	// 1. p正在运行？ 可能是被中断唤醒，直接置为TASK_RUNNING即可
 	if (p == current) {
 		/*
 		 * We're waking current, this means 'p->on_rq' and 'task_cpu(p)
@@ -3191,7 +3196,7 @@ try_to_wake_up(struct task_struct *p, unsigned int state, int wake_flags)
 	 * A similar smb_rmb() lives in try_invoke_on_locked_down_task().
 	 */
 	smp_rmb();
-	// 唤醒runnable task
+	// 2. 唤醒runnable task
 	if (READ_ONCE(p->on_rq) && ttwu_runnable(p, wake_flags))
 		goto unlock;
 
@@ -3251,7 +3256,7 @@ try_to_wake_up(struct task_struct *p, unsigned int state, int wake_flags)
 	 * to ensure we observe the correct CPU on which the task is currently
 	 * scheduling.
 	 */
-	// p在其他cpu上正在执行，让其他cpu wakeup吧
+	// 3. p在其他cpu上正在执行，让其他cpu wakeup吧
 	if (smp_load_acquire(&p->on_cpu) &&
 	    ttwu_queue_wakelist(p, task_cpu(p), wake_flags | WF_ON_CPU))
 		goto unlock;
@@ -3284,12 +3289,15 @@ try_to_wake_up(struct task_struct *p, unsigned int state, int wake_flags)
 #else
 	cpu = task_cpu(p);
 #endif /* CONFIG_SMP */
-	// 入队，唤醒
+	// 4. 入队，唤醒
+	// 需要考虑如果当前唤醒者cpu与p dst cpu不同 怎么处理？
+	// 如果两者cpu不在同一个mc sd（大核组，小核组），或者dst cpu是idle的，那么发ipi给dst cpu来完成唤醒；
+	// 否则由当前唤醒者cpu，执行唤醒流程；
 	ttwu_queue(p, cpu, wake_flags);
 unlock:
 	raw_spin_unlock_irqrestore(&p->pi_lock, flags);
 out:
-	// 统计数据
+	// 5. 统计数据
 	if (success) {
 		trace_android_rvh_try_to_wake_up_success(p);
 		ttwu_stat(p, task_cpu(p), wake_flags);
@@ -4816,6 +4824,8 @@ static void __sched notrace __schedule(bool preempt)
 	 *  - ptrace_{,un}freeze_traced() can change ->state underneath us.
 	 */
 	prev_state = prev->state;
+	// 1. 如果task置为非running状态(0:TASK_RUNNING),即task阻塞
+	// 如果preempt==true，表示task是被抢占，所以不需要deactivate_task
 	if (!preempt && prev_state) {
 		if (signal_pending_state(prev_state, prev)) {
 			prev->state = TASK_RUNNING;
@@ -4839,6 +4849,7 @@ static void __sched notrace __schedule(bool preempt)
 			 *
 			 * After this, schedule() must not care about p->state any more.
 			 */
+			// 移出就绪队列
 			deactivate_task(rq, prev, DEQUEUE_SLEEP | DEQUEUE_NOCLOCK);
 
 			if (prev->in_iowait) {
@@ -4849,11 +4860,13 @@ static void __sched notrace __schedule(bool preempt)
 		switch_count = &prev->nvcsw;
 	}
 
+	// 2. 选择下一个合适的task
 	next = pick_next_task(rq, prev, &rf);
-	clear_tsk_need_resched(prev);
+	clear_tsk_need_resched(prev); // 清除resched flag
 	clear_preempt_need_resched();
 
 	trace_android_rvh_schedule(prev, next, rq);
+	// 3. 下一个合适的task不是当前task，切换
 	if (likely(prev != next)) {
 		rq->nr_switches++;
 		/*
@@ -4882,6 +4895,7 @@ static void __sched notrace __schedule(bool preempt)
 		trace_sched_switch(preempt, prev, next);
 
 		/* Also unlocks the rq: */
+		// 上下文切换
 		rq = context_switch(rq, prev, next, &rf);
 	} else {
 		rq->clock_update_flags &= ~(RQCF_ACT_SKIP|RQCF_REQ_SKIP);
@@ -6475,10 +6489,17 @@ SYSCALL_DEFINE0(sched_yield)
 	return 0;
 }
 
+// 主要在非内核抢占系统中使用，如PREEMPT_NONE 或者 PREEMPT_VOLUNTARY
+// 由于内核中存在某些耗时操作，为了尽可能减少延迟，在这些耗时操作的地方调用手动加入_cond_resched
+// 即所谓的：自愿抢占
+// 调用_cond_resched的地方成为 自愿抢占点
 #ifndef CONFIG_PREEMPTION
 int __sched _cond_resched(void)
 {
+	// 判断current_thread_info()->preempt_count == 0
+	// 即没有preempt_disable
 	if (should_resched(0)) {
+		// 抢占调度
 		preempt_schedule_common();
 		return 1;
 	}

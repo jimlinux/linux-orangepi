@@ -166,6 +166,8 @@ extern void preempt_count_sub(int val);
 
 #ifdef CONFIG_PREEMPT_COUNT
 
+// 禁用内核抢占，通过计数实现
+// 所以preempt_disable可以嵌套使用，计数为0时，才能抢占
 #define preempt_disable() \
 do { \
 	preempt_count_inc(); \
@@ -183,6 +185,7 @@ do { \
 #define preemptible()	(preempt_count() == 0 && !irqs_disabled())
 
 #ifdef CONFIG_PREEMPTION
+// dec计数，当计数为0时，执行__preempt_schedule调度
 #define preempt_enable() \
 do { \
 	barrier(); \
