@@ -4927,12 +4927,15 @@ static void __account_cfs_rq_runtime(struct cfs_rq *cfs_rq, u64 delta_exec)
 	cfs_rq->runtime_remaining -= delta_exec;
 
 	if(cfs_rq->boosted) {
+		/*
 		struct cfs_bandwidth *cfs_b = tg_cfs_bandwidth(cfs_rq->tg);
 		raw_spin_lock(&cfs_b->lock);
 		cfs_b->boosted_time += delta_exec;
 		raw_spin_unlock(&cfs_b->lock);
+		*/
 
 		cfs_rq->runtime_boosted -= delta_exec;
+		cfs_rq->total_runtime_boosted += delta_exec;
 	}
 
 	if (likely(cfs_rq->runtime_remaining > 0))
@@ -5075,6 +5078,7 @@ static bool throttle_cfs_rq(struct cfs_rq *cfs_rq)
 				cfs_rq->runtime_remaining -= cfs_rq->runtime_boosted;
 				cfs_rq->runtime_boosted = 0;
 				list_del_rcu(&cfs_rq->boosted_list);
+				rq->bursted_cfs_rq = NULL;
 			}
 		}
 	}
@@ -5297,6 +5301,7 @@ static int do_sched_cfs_period_timer(struct cfs_bandwidth *cfs_b, int overrun, u
 			set_burst_state(cfs_rq, 0);
 			cfs_rq->runtime_remaining -= cfs_rq->runtime_boosted;
 			cfs_rq->runtime_boosted = 0;
+			rq->bursted_cfs_rq = NULL;
 			raw_spin_lock_irqsave(&cfs_b->lock, flags);
 			list_del_rcu(&cfs_rq->boosted_list);
 			raw_spin_unlock_irqrestore(&cfs_b->lock, flags);
@@ -5468,8 +5473,11 @@ static u64 distribute_cfs_runtime_boost(struct rq *cur_rq)
 	u64 total_runtime = 0;
 	unsigned long flags;
 	u64 slice = sched_cfs_bandwidth_slice() / 2;
+	u64 min_runtime_boosted = 0;
 
 	rcu_read_lock();
+	cur_rq->bursted_cfs_rq = NULL;
+	// find cfs_rq which have min burstd runtime, then burst it
 	list_for_each_entry_rcu(cfs_rq, &cur_rq->throttled_cfs_rq,
 							throttled_rq_list) {
 		struct cfs_bandwidth *cfs_b = tg_cfs_bandwidth(cfs_rq->tg);
@@ -5480,32 +5488,43 @@ static u64 distribute_cfs_runtime_boost(struct rq *cur_rq)
 				raw_spin_unlock_irqrestore(&cfs_b->lock, flags);
 				continue;
 		}
+		raw_spin_unlock_irqrestore(&cfs_b->lock, flags);
 
 		if (!cfs_rq_throttled(cfs_rq)
 				|| cfs_rq->runtime_remaining > 0) {
-			raw_spin_unlock_irqrestore(&cfs_b->lock, flags);
 			continue;
 		}
 
-		// add to cfs_b boosted_cfs_rq
-		list_add_tail_rcu(&cfs_rq->boosted_list,
-				  &cfs_b->boosted_cfs_rq);
+		if (min_runtime_boosted == 0 ||
+				(s64)(cfs_rq->total_runtime_boosted - min_runtime_boosted) < 0) {
+			min_runtime_boosted = cfs_rq->total_runtime_boosted;
+			cur_rq->bursted_cfs_rq = cfs_rq;
+		}
+	}
+	if (cur_rq->bursted_cfs_rq) {
+		cur_rq->min_runtime_boosted = min_runtime_boosted;
 
+		struct cfs_bandwidth *cfs_b = tg_cfs_bandwidth(cur_rq->bursted_cfs_rq->tg);
+		// add to cfs_b boosted_cfs_rq
+		raw_spin_lock_irqsave(&cfs_b->lock, flags);
+		list_add_tail_rcu(&cur_rq->bursted_cfs_rq->boosted_list,
+			&cfs_b->boosted_cfs_rq);
 		raw_spin_unlock_irqrestore(&cfs_b->lock, flags);
 
 		// temp 5ms / 2
-		runtime = -cfs_rq->runtime_remaining + slice;
+		runtime = -cur_rq->bursted_cfs_rq->runtime_remaining + slice;
 
-		cfs_rq->runtime_remaining += runtime;
-		cfs_rq->runtime_boosted = runtime;
-		set_burst_state(cfs_rq, 1);
+		cur_rq->bursted_cfs_rq->runtime_remaining += runtime;
+		cur_rq->bursted_cfs_rq->runtime_boosted = runtime;
+		set_burst_state(cur_rq->bursted_cfs_rq, 1);
 
 		total_runtime += runtime;
 
 		/* we check whether we're throttled above */
-		if (cfs_rq->runtime_remaining > 0)
-			unthrottle_cfs_rq(cfs_rq);
+		if (cur_rq->bursted_cfs_rq->runtime_remaining > 0)
+			unthrottle_cfs_rq(cur_rq->bursted_cfs_rq);
 	}
+
 	rcu_read_unlock();
 	return total_runtime;
 }
@@ -7762,10 +7781,7 @@ static void check_preempt_wakeup(struct rq *rq, struct task_struct *p, int wake_
 
 	if (cfs_rq->boosted && !cfs_rq_of(pse)->boosted) {
 		// todo
-		for_each_sched_entity(se) {
-			struct cfs_rq * cfs_rq = cfs_rq_of(se);
-			if(!cfs_rq->boosted)
-				break;
+		if (rq->bursted_cfs_rq) {
 			cfs_rq->runtime_remaining -= cfs_rq->runtime_boosted;
 			cfs_rq->runtime_boosted = 0;
 		}
@@ -8438,6 +8454,7 @@ static inline int migrate_degrades_locality(struct task_struct *p,
 }
 #endif
 
+// todo
 /*
  * can_migrate_task - may task p from runqueue rq be migrated to this_cpu?
  */
@@ -8468,6 +8485,10 @@ int can_migrate_task(struct task_struct *p, struct lb_env *env)
 	// 2. per cpu运行的kthread，不要migrate
 	/* Disregard pcpu kthreads; they are where they need to be. */
 	if (kthread_is_per_cpu(p))
+		return 0;
+
+	// bursted, not migrate
+	if(task_cfs_rq(p)->boosted)
 		return 0;
 
 	// 3. p的亲和性cpu不包含dst_cpu, 不要migrate
@@ -10655,6 +10676,9 @@ voluntary_active_balance(struct lb_env *env)
 {
 	struct sched_domain *sd = env->sd;
 
+	if (env->src_rq->bursted_cfs_rq)
+		return 0;
+
 	if (asym_active_balance(env))
 		return 1;
 
@@ -10740,7 +10764,7 @@ static int should_we_balance(struct lb_env *env)
  * Check this_cpu to ensure it is balanced within domain. Attempt to move
  * tasks if there is an imbalance.
  */
-// 主要功能：在@sd中计算this cpu所在local group和最繁忙的busiest group负载，
+// 主要功能：在@sd中计算this cpu所在group即local group和最繁忙的busiest group负载，
 //		判定的两者不均衡性，把busiest group中busiest cpu中一些task pull到this cpu，
 //		使sd内负载尽量均衡；
 // @this_cpu 本次要进行负载均衡的CPU。需要注意的是：对于new idle balance和tick balance而言，
@@ -10762,6 +10786,7 @@ static int should_we_balance(struct lb_env *env)
 	由于是MC，只有一个cpu，busiest->cpu=3
 3. 从busiest->cpu==3 detach一些tasks，使env->imbalance降低为0，attach到this_cpu==1
 ===> 是否继续在die均衡由continue_balancing(should_we_balance)决定，默认为1
+如果需要继续在上层sd均衡，则设置continue_balancing==1，由load_balance调用者继续触发均衡:
 0.在die sd：{[0,1,2,3],[4,5,6,7]}中均衡，
 1.找最buesiest的sg(find_busiest_group): 
 	2.1 local_group=[0,1,2,3],假设计算出busiest_group=[4,5,6,7]
@@ -10824,10 +10849,12 @@ redo:
 
 	schedstat_add(sd->lb_imbalance[idle], env.imbalance);
 
+	// 从scr_cpu拉任务到dst_cpu
 	env.src_cpu = busiest->cpu;
 	env.src_rq = busiest;
 
 	ld_moved = 0;
+	// 最忙的cpu上有多个任务等待运行，把等待的任务迁走吧
 	if (busiest->nr_running > 1) {
 		/*
 		 * Attempt to move tasks. If find_busiest_group has found
@@ -10904,7 +10931,7 @@ more_balance:
 		 * excess load moved.
 		 */
 		// 4.1 经过上面迁移，sd仍然未均衡，
-		// LBF_DST_PINNED表示之前迁移中有task因为affinity没有被迁到dst cpu。
+		// LBF_DST_PINNED表示之前迁移中有task因为affinity绑核不能被迁到dst cpu。
 		// 这时候要继续在src rq上搜索任务迁移到备选的dest cpu，因此，这里再次发起均衡操作。
 		// 这里的均衡上下文的dest cpu设定为备选的cpu，loop也被清零，重新开始扫描
 		if ((env.flags & LBF_DST_PINNED) && env.imbalance > 0) {
@@ -10963,7 +10990,7 @@ more_balance:
 		}
 	}
 
-	// 5. src cpu上的cfs任务链表已经被遍历（也可能遍历多次），任然没有task可迁移
+	// 5. src cpu上的cfs任务链表已经被遍历（也可能遍历多次），仍然没有task可迁移
 	// 不行就只能考虑迁移src cpu上running task了
 	if (!ld_moved) {
 		schedstat_inc(sd->lb_failed[idle]);

@@ -188,9 +188,9 @@ TRACE_EVENT(sched_switch,
  */
 TRACE_EVENT(sched_migrate_task,
 
-	TP_PROTO(struct task_struct *p, int dest_cpu),
+	TP_PROTO(struct task_struct *p, int dest_cpu, int is_bursted),
 
-	TP_ARGS(p, dest_cpu),
+	TP_ARGS(p, dest_cpu, is_bursted),
 
 	TP_STRUCT__entry(
 		__array(	char,	comm,	TASK_COMM_LEN	)
@@ -199,6 +199,7 @@ TRACE_EVENT(sched_migrate_task,
 		__field(	int,	orig_cpu		)
 		__field(	int,	dest_cpu		)
 		__field(	int,	running			)
+		__field(	int,	is_bursted		)
 	),
 
 	TP_fast_assign(
@@ -208,12 +209,14 @@ TRACE_EVENT(sched_migrate_task,
 		__entry->orig_cpu	= task_cpu(p);
 		__entry->dest_cpu	= dest_cpu;
 		__entry->running	= (p->state == TASK_RUNNING);
+		__entry->is_bursted	= is_bursted;
 	),
 
-	TP_printk("comm=%s pid=%d prio=%d orig_cpu=%d dest_cpu=%d running=%d",
+	TP_printk("comm=%s pid=%d prio=%d orig_cpu=%d dest_cpu=%d running=%d, is_bursted=%d",
 		  __entry->comm, __entry->pid, __entry->prio,
 		  __entry->orig_cpu, __entry->dest_cpu,
-		  __entry->running)
+		  __entry->running,
+		  __entry->is_bursted)
 );
 
 DECLARE_EVENT_CLASS(sched_process_template,

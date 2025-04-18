@@ -2237,7 +2237,10 @@ void set_task_cpu(struct task_struct *p, unsigned int new_cpu)
 	WARN_ON_ONCE(!cpu_online(new_cpu));
 #endif
 
-	trace_sched_migrate_task(p, new_cpu);
+	if (p->se.cfs_rq)
+		trace_sched_migrate_task(p, new_cpu, p->se.cfs_rq->boosted);
+	else
+		trace_sched_migrate_task(p, new_cpu, 2); // 2: non-cfs task
 
 	if (task_cpu(p) != new_cpu) {
 		if (p->sched_class->migrate_task_rq)
@@ -7679,6 +7682,8 @@ void __init sched_init(void)
 		init_tg_cfs_entry(&root_task_group, &rq->cfs, NULL, i, NULL);
 #ifdef CONFIG_CFS_BANDWIDTH
 		INIT_LIST_HEAD(&rq->throttled_cfs_rq);
+		rq->bursted_cfs_rq = NULL;
+		rq->min_runtime_boosted = 0;
 #endif /* CONFIG_CFS_BANDWIDTH */
 #endif /* CONFIG_FAIR_GROUP_SCHED */
 
@@ -8524,6 +8529,10 @@ static int tg_set_cfs_bandwidth(struct task_group *tg, u64 period, u64 quota, u6
 		cfs_rq->runtime_enabled = runtime_enabled;
 		cfs_rq->runtime_remaining = 0;
 		cfs_rq->runtime_boosted = 0;
+		if (burst_idle)
+			cfs_rq->total_runtime_boosted = rq->min_runtime_boosted;
+		else
+			cfs_rq->total_runtime_boosted = 0;
 
 		if (cfs_rq->throttled)
 			unthrottle_cfs_rq(cfs_rq);
