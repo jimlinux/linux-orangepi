@@ -31,9 +31,9 @@ struct binder_transaction;
  * @debug_id:           unique ID for debugging
  * @transaction:        pointer to associated struct binder_transaction
  * @target_node:        struct binder_node associated with this buffer
- * @data_size:          size of @transaction data
- * @offsets_size:       size of array of offsets
- * @extra_buffers_size: size of space for other objects (like sg lists)
+ * @data_size:          size of @transaction data 传递的数据
+ * @offsets_size:       size of array of offsets 偏移数组的数据大小？
+ * @extra_buffers_size: size of space for other objects (like sg lists) 其他数据类型的如list的数据大小
  * @user_data:          user pointer to base of buffer space
  * @pid:                pid to attribute the buffer to (caller)
  *

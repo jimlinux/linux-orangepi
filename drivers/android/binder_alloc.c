@@ -1223,10 +1223,15 @@ binder_alloc_copy_user_to_buffer(struct binder_alloc *alloc,
 		pgoff_t pgoff;
 		void *kptr;
 
+		// 1. 获取target buffer的1个page
 		page = binder_alloc_get_page(alloc, buffer,
 					     buffer_offset, &pgoff);
 		size = min_t(size_t, bytes, PAGE_SIZE - pgoff);
+		// 2. 把这个page映射到内核空间，得到内核虚拟内存地址
+		// 这里kmap调用page_address，在64位上是page直接映射到内核地址空间上（线性，不需要页表）
 		kptr = kmap(page) + pgoff;
+		// 3. 从用户空间把数据拷贝到这个内核地址空间，由于这个page也被映射到了target进程的用户虚拟地址空间
+		// 这里是binder只有一次拷贝的核心
 		ret = copy_from_user(kptr, from, size);
 		kunmap(page);
 		if (ret)

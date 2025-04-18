@@ -339,7 +339,9 @@ struct binder_transaction_data {
 	__u32	        flags;
 	pid_t		sender_pid;
 	uid_t		sender_euid;
+	// 数据大小
 	binder_size_t	data_size;	/* number of bytes of data */
+	// 数组的大小，数组每个元素是偏移
 	binder_size_t	offsets_size;	/* number of bytes of offsets */
 
 	/* If this transaction is inline, the data immediately

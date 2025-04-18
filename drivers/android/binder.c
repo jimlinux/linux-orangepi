@@ -3296,6 +3296,10 @@ static void binder_transaction(struct binder_proc *proc,
 
 	trace_binder_transaction(reply, t, target_node);
 
+	// 1. 获取目标进程的buffer
+	// t->buffer: 获取target proc（目标进程）的buffer
+	// tr->data_size: 需要从from进程拷贝到target进程的数据大小
+	// offsets_size, extra_buffers_size：偏移
 	t->buffer = binder_alloc_new_buf(&target_proc->alloc, tr->data_size,
 		tr->offsets_size, extra_buffers_size,
 		!reply && (t->flags & TF_ONE_WAY), current->tgid);
@@ -3334,6 +3338,12 @@ static void binder_transaction(struct binder_proc *proc,
 	t->buffer->clear_on_free = !!(t->flags & TF_CLEAR_BUF);
 	trace_binder_transaction_alloc_buf(t->buffer);
 
+	// 2. 源进程的数据格式猜测如下：
+	// [data数据区，长度data_size][offsets数组区，长度offsets_size]
+	// data数据区放着所有需要拷贝的数据；
+	// offsets数组区存放data数据区中binder_object数据的偏移
+	// 这里先拷贝offsets数组的数据到target进程的buffer中，为后面解析转换做准备
+	// - 主要用来支持传送binder_object, 需要对binder_object做转换
 	if (binder_alloc_copy_user_to_buffer(
 				&target_proc->alloc,
 				t->buffer,
@@ -3365,13 +3375,16 @@ static void binder_transaction(struct binder_proc *proc,
 		return_error_line = __LINE__;
 		goto err_bad_offset;
 	}
+	// offsets数组区开始
 	off_start_offset = ALIGN(tr->data_size, sizeof(void *));
 	buffer_offset = off_start_offset;
+	// offsets数组区结束
 	off_end_offset = off_start_offset + tr->offsets_size;
 	sg_buf_offset = ALIGN(off_end_offset, sizeof(void *));
 	sg_buf_end_offset = sg_buf_offset + extra_buffers_size -
 		ALIGN(secctx_sz, sizeof(u64));
 	off_min = 0;
+	// 3. 遍历offsets数组中的offset，通过offset从data数据区分别拷贝到target buffer
 	for (buffer_offset = off_start_offset; buffer_offset < off_end_offset;
 	     buffer_offset += sizeof(binder_size_t)) {
 		struct binder_object_header *hdr;
@@ -3380,6 +3393,7 @@ static void binder_transaction(struct binder_proc *proc,
 		binder_size_t object_offset;
 		binder_size_t copy_size;
 
+		// 3.1 从taget进程的buffer中offsets数组元素（也就是1个offset）到object_offset
 		if (binder_alloc_copy_from_buffer(&target_proc->alloc,
 						  &object_offset,
 						  t->buffer,
@@ -3395,7 +3409,11 @@ static void binder_transaction(struct binder_proc *proc,
 		 * Copy the source user buffer up to the next object
 		 * that will be processed.
 		 */
+		// user_offset是offsets数组中前一个offset，初值为0
+		// user_buffer即源进程数据指针
+		// copy_size为本offset与前一个offset之差
 		copy_size = object_offset - user_offset;
+		// 3.2 拷贝数据！
 		if (copy_size && (user_offset > object_offset ||
 				binder_alloc_copy_user_to_buffer(
 					&target_proc->alloc,
@@ -3409,6 +3427,7 @@ static void binder_transaction(struct binder_proc *proc,
 			return_error_line = __LINE__;
 			goto err_copy_data_failed;
 		}
+		// 3.3 偏移指向data数据区中binder_object对象
 		object_size = binder_get_object(target_proc, user_buffer,
 				t->buffer, object_offset, &object);
 		if (object_size == 0 || object_offset < off_min) {
@@ -3430,6 +3449,7 @@ static void binder_transaction(struct binder_proc *proc,
 
 		hdr = &object.hdr;
 		off_min = object_offset + object_size;
+		// 3.4 解析binder_object类型，转换，再重新写入target proc的buffer中
 		switch (hdr->type) {
 		case BINDER_TYPE_BINDER:
 		case BINDER_TYPE_WEAK_BINDER: {
@@ -3454,9 +3474,10 @@ static void binder_transaction(struct binder_proc *proc,
 			struct flat_binder_object *fp;
 
 			fp = to_flat_binder_object(hdr);
+			// 转换
 			ret = binder_translate_handle(fp, t, thread);
 			if (ret < 0 ||
-			    binder_alloc_copy_to_buffer(&target_proc->alloc,
+			    binder_alloc_copy_to_buffer(&target_proc->alloc, // 写入target proc buffer
 							t->buffer,
 							object_offset,
 							fp, sizeof(*fp))) {
@@ -3617,6 +3638,7 @@ static void binder_transaction(struct binder_proc *proc,
 		}
 	}
 	/* Done processing objects, copy the rest of the buffer */
+	// 3.5 其他数据直接拷贝就行了，不需要解析
 	if (binder_alloc_copy_user_to_buffer(
 				&target_proc->alloc,
 				t->buffer, user_offset,
@@ -5103,6 +5125,7 @@ static int binder_ioctl_write_read(struct file *filp,
 		ret = -EINVAL;
 		goto out;
 	}
+	// 拷贝读写操作元数据，包括size和buffer地址
 	if (copy_from_user(&bwr, ubuf, sizeof(bwr))) {
 		ret = -EFAULT;
 		goto out;
