@@ -325,8 +325,8 @@ struct sched_info {
 # define SCHED_CAPACITY_SCALE		(1L << SCHED_CAPACITY_SHIFT)
 
 struct load_weight {
-	unsigned long			weight;
-	u32				inv_weight;
+	unsigned long			weight; // nice0 = 1024 << 10
+	u32				inv_weight; // 用于浮点计算
 };
 
 /**

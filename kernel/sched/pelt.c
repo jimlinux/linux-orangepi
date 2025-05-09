@@ -190,14 +190,15 @@ accumulate_sum(u64 delta, struct sched_avg *sa,
 	u32 contrib = (u32)delta; /* p == 0 -> delta < 1024 */
 	u64 periods;
 
-	// 1. delta加上次的d3，用来凑满一个周期做下面的整除，实际并不计入负载
+	// 0. delta加上次的d3(sa->period_contrib)，用来凑满一个周期做下面的整除，
+	// 实际sa->period_contrib并不计入负载
 	delta += sa->period_contrib;
 	periods = delta / 1024; /* A period is 1024us (~1ms) */
 
 	/*
 	 * Step 1: decay old *_sum if we crossed period boundaries.
 	 */
-	// 1. delta大于1个周期（1024us），计算old_load * y^periods， 对3种old load衰减
+	// 1. delta大于1个周期（1024us），计算old_load * y^periods， 对old load,runnable,util衰减
 	if (periods) {
 		sa->load_sum = decay_load(sa->load_sum, periods);
 		sa->runnable_sum =
@@ -415,6 +416,10 @@ EXPORT_SYMBOL_GPL(__update_load_avg_blocked_se);
 // 主要作用：更新se负载
 int __update_load_avg_se(u64 now, struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
+	// 传入参数
+	// 1. load = !!se->on_rq: 表示se是否就绪(运行+就绪等待运行)
+	// 2. runnable = se_runnable(se): task se：=!!se->on_rq同上；group se：= 下属所有运行+就绪se数量
+	// 3. running: 表示当前se是否正在运行
 	if (___update_load_sum(now, &se->avg, !!se->on_rq, se_runnable(se),
 				cfs_rq->curr == se)) {
 

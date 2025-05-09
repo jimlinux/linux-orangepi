@@ -537,8 +537,11 @@ struct cfs_bandwidth { };
 
 /* CFS-related fields in a runqueue */
 struct cfs_rq {
+	// 权重，nice=0, 则load.weight=1024 << 10
 	struct load_weight	load;
+	// cfs_rq下直属的running（包括运行+就绪） se数量
 	unsigned int		nr_running;
+	// cfs_rq下所有running se的数量
 	unsigned int		h_nr_running;      /* SCHED_{NORMAL,BATCH,IDLE} */
 	unsigned int		idle_h_nr_running; /* SCHED_IDLE */
 
@@ -2203,6 +2206,8 @@ void arch_scale_freq_tick(void)
  *     ------ * SCHED_CAPACITY_SCALE
  *     f_max
  */
+
+ // = cpu当前频率 / cpu最大频率 * 1024
 static __always_inline
 unsigned long arch_scale_freq_capacity(int cpu)
 {

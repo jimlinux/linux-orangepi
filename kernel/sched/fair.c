@@ -791,7 +791,7 @@ static u64 sched_slice(struct cfs_rq *cfs_rq, struct sched_entity *se)
  *
  * vs = s/w
  */
-// 计算1个调度周期内，se分得的vruntime
+// 计算1个调度周期内，把se应分的的实际时间转为vruntime
 static u64 sched_vslice(struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
 	return calc_delta_fair(sched_slice(cfs_rq, se), se);
@@ -4582,7 +4582,7 @@ check_preempt_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr)
 	s64 delta;
 	bool skip_preempt = false;
 
-	// 1. 计算在一个调度周期内分到的实际时间片
+	// 1. 计算在一个调度周期内应得的实际时间片
 	ideal_runtime = sched_slice(cfs_rq, curr);
 	// 2. 计算从本次被调度选中到现在的运行时间
 	delta_exec = curr->sum_exec_runtime - curr->prev_sum_exec_runtime;
@@ -4611,7 +4611,10 @@ check_preempt_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr)
 	if (delta_exec < sysctl_sched_min_granularity)
 		return;
 
-	// 看leftmost se
+	// 看leftmost se：
+	// 怎样保证在一个调度周期内是公平的呢？
+	// 步骤2，可能还不够，假如在一个周期内curr运行了多次？
+	// 所以下面要进一步看vruntime，vruntime能保证公平；
 	se = __pick_first_entity(cfs_rq);
 	delta = curr->vruntime - se->vruntime;
 
@@ -9367,10 +9370,15 @@ group_is_overloaded(unsigned int imbalance_pct, struct sg_lb_stats *sgs)
 	if (sgs->sum_nr_running <= sgs->group_weight)
 		return false;
 
+	// imbalance_pct>100,假设=110
+	// => group_util > group_capacity * 0.91
+	// => overload
 	if ((sgs->group_capacity * 100) <
 			(sgs->group_util * imbalance_pct))
 		return true;
 
+	// => group_runnable > group_capacity * 1.1
+	// => overload
 	if ((sgs->group_capacity * imbalance_pct) <
 			(sgs->group_runnable * 100))
 		return true;
@@ -10169,7 +10177,9 @@ static inline void calculate_imbalance(struct lb_env *env, struct sd_lb_stats *s
 {
 	struct sg_lb_stats *local, *busiest;
 
+	// 迁入cpu所在group的统计数据
 	local = &sds->local_stat;
+	// 最忙group的统计数据
 	busiest = &sds->busiest_stat;
 
 	// 1. busiest group上有misfit task，那么优先对其进行misfit任务迁移，并且一次迁移一个misfit task

@@ -96,7 +96,7 @@ struct sched_domain {
 	// 如果cpu繁忙，那么均衡要时间间隔长一些，即时间间隔定义为busy_factor * balance_interval
 	// busy_factor默认=32
 	unsigned int busy_factor;	/* less balancing by factor if busy */
-	// 定义判定不均衡的水位线
+	// 定义判定不均衡的水位线，在sd_init中初始化，默认110或117
 	unsigned int imbalance_pct;	/* No balance until over watermark */
 	// 和nr_balance_failed配合控制负载均衡过程的迁移力度。
 	// 当nr_balance_failed大于cache_nice_tries的时候，负载均衡会变得更加激进。
@@ -274,6 +274,7 @@ static inline bool cpus_share_cache(int this_cpu, int that_cpu)
  *      ----------------------------- * SCHED_CAPACITY_SCALE
  *      max(max_perf(c) : c \in CPUs)
  */
+
 // =  @cpu的最大频率/系统最大算力cpu的最大频率 * 1024
 static __always_inline
 unsigned long arch_scale_cpu_capacity(int cpu)

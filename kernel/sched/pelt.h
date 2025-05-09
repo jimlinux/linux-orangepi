@@ -75,12 +75,15 @@ extern unsigned int sched_pelt_lshift;
  * clock pelt      | 1| 2|    3|    4| 7| 8| 9|   10|   11|14|15|16
  *
  */
+
+ // 理解：se1以最大频率运行10ms，se2以一半的频率运行10ms，显然se2的负载要低
 static inline void update_rq_clock_pelt(struct rq *rq, s64 delta)
 {
 	delta <<= READ_ONCE(sched_pelt_lshift);
 
 	per_cpu(clock_task_mult, rq->cpu) += delta;
 
+	// 1. 当cpu进入idle时，与clock task同步
 	if (unlikely(is_idle_task(rq->curr))) {
 		/* The rq is idle, we can sync to clock_task */
 		rq->clock_pelt = rq_clock_task_mult(rq);
@@ -103,7 +106,9 @@ static inline void update_rq_clock_pelt(struct rq *rq, s64 delta)
 	 * Scale the elapsed time to reflect the real amount of
 	 * computation
 	 */
+	// 2. delta = delta * (本cpu最大频率/系统中cpu最大频率)
 	delta = cap_scale(delta, arch_scale_cpu_capacity(cpu_of(rq)));
+	// 3. delta = delta * (本cpu当前频率/本cpu最大频率)
 	delta = cap_scale(delta, arch_scale_freq_capacity(cpu_of(rq)));
 
 	rq->clock_pelt += delta;
